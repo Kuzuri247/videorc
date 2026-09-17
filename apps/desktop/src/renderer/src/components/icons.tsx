@@ -90,6 +90,8 @@ import {
   TerminalWindow,
   TextAa,
   Trash,
+  InstagramLogo,
+  TiktokLogo,
   TwitchLogo,
   UploadSimple,
   UserCircle,
@@ -259,3 +261,5 @@ export const DarkModeIcon: AppIcon = Moon
 export const TwitchIcon: AppIcon = TwitchLogo
 export const XPlatformIcon: AppIcon = XLogo
 export const YoutubeIcon: AppIcon = YoutubeLogo
+export const TiktokIcon: AppIcon = TiktokLogo
+export const InstagramIcon: AppIcon = InstagramLogo

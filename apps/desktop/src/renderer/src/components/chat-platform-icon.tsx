@@ -1,6 +1,8 @@
 import {
   type AppIcon,
+  InstagramIcon,
   LivestreamIcon,
+  TiktokIcon,
   TwitchIcon,
   XPlatformIcon,
   YoutubeIcon
@@ -19,6 +21,8 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   youtube: 'YouTube',
   twitch: 'Twitch',
   x: 'X',
+  tiktok: 'TikTok',
+  instagram: 'Instagram',
   custom: 'Custom'
 }
 
@@ -26,6 +30,8 @@ const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,
   twitch: TwitchIcon,
   x: XPlatformIcon,
+  tiktok: TiktokIcon,
+  instagram: InstagramIcon,
   custom: LivestreamIcon
 }
 
@@ -33,6 +39,8 @@ const CHAT_PLATFORM_TINT: Record<StreamPlatform, string> = {
   youtube: 'text-[#ff0033]',
   twitch: 'text-[#a970ff]',
   x: 'text-foreground',
+  tiktok: 'text-foreground',
+  instagram: 'text-[#e1306c]',
   custom: 'text-muted-foreground'
 }
 

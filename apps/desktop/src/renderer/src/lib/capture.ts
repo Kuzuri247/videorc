@@ -10,6 +10,8 @@ import type {
   LayoutSettings,
   RtmpPreset,
   SideBySideSplit,
+  SimulcastParams,
+  StreamOutputOrientation,
   SourceSelection,
   StreamingSettings,
   StreamPlatform,
@@ -183,6 +185,50 @@ export function coerceVideoToOrientation(
   return { ...video, preset: 'custom', width: video.height, height: video.width }
 }
 
+/**
+ * Whether this config arms the dual-orientation simulcast leg: streaming is
+ * on, at least one enabled destination is vertical-bound, and the Studio is
+ * editing a horizontal scene (the vertical leg composes from vertical-mode
+ * memory). In vertical Studio mode the single canvas IS portrait — no second
+ * leg exists to arm.
+ */
+export function simulcastArmed(
+  config: Pick<CaptureConfig, 'streamEnabled' | 'streaming' | 'layout'>
+): boolean {
+  return (
+    config.streamEnabled &&
+    config.streaming.enabled &&
+    layoutPresetOrientation(config.layout.layoutPreset) === 'horizontal' &&
+    config.streaming.targets.some(
+      (target) =>
+        target.enabled &&
+        target.outputOrientation === 'vertical' &&
+        config.streaming.enabledTargetIds.includes(target.id)
+    )
+  )
+}
+
+/**
+ * The vertical leg's session params, built from vertical-mode memory: the
+ * remembered vertical scene preset on the transposed (portrait) canvas.
+ * Camera transform memory stays preset-mode — vertical scenes are band/full
+ * layouts, and a landscape custom drag must never leak into the portrait leg.
+ */
+export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | undefined {
+  if (!simulcastArmed(config)) {
+    return undefined
+  }
+  return {
+    layout: {
+      ...config.layout,
+      layoutPreset: config.lastVerticalPreset,
+      cameraTransformMode: 'preset',
+      cameraTransform: null
+    },
+    video: coerceVideoToOrientation(config.video, 'vertical')
+  }
+}
+
 export type ResolutionOption = {
   label: string
   detail: string
@@ -354,39 +400,97 @@ export const rtmpDefaults: Record<RtmpPreset, string> = {
 }
 
 // Fixed destination order for the Streaming tab (YouTube, Twitch, X, Custom).
-export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = ['youtube', 'twitch', 'x', 'custom']
+export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
+  'youtube',
+  'twitch',
+  'x',
+  'tiktok',
+  'instagram',
+  'custom'
+]
 
 const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   youtube: 'YouTube',
   twitch: 'Twitch',
   x: 'X / Twitter',
+  tiktok: 'TikTok',
+  instagram: 'Instagram',
   custom: 'Custom RTMP'
 }
 
+/**
+ * The built-in destination cards, ID-keyed (two YouTube cards share one
+ * platform): the horizontal trio, the vertical trio (YouTube Vertical is a
+ * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
+ * only), then Custom RTMP.
+ */
+export const STREAM_TARGET_DEFS: ReadonlyArray<{
+  id: string
+  platform: StreamPlatform
+  label: string
+  serverUrl: string
+  outputOrientation?: StreamOutputOrientation
+}> = [
+  { id: 'youtube', platform: 'youtube', label: 'YouTube', serverUrl: rtmpDefaults.youtube },
+  { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
+  { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
+  {
+    id: 'youtube-vertical',
+    platform: 'youtube',
+    label: 'YouTube Vertical',
+    serverUrl: rtmpDefaults.youtube,
+    outputOrientation: 'vertical'
+  },
+  {
+    id: 'tiktok',
+    platform: 'tiktok',
+    label: 'TikTok',
+    serverUrl: '',
+    outputOrientation: 'vertical'
+  },
+  {
+    id: 'instagram',
+    platform: 'instagram',
+    label: 'Instagram',
+    serverUrl: 'rtmps://live-upload.instagram.com:443/rtmp/',
+    outputOrientation: 'vertical'
+  },
+  { id: 'custom', platform: 'custom', label: 'Custom RTMP', serverUrl: '' }
+]
+
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
-  return platform === 'custom' ? 'Custom RTMP does not support OAuth.' : null
+  if (platform === 'custom') {
+    return 'Custom RTMP does not support OAuth.'
+  }
+  if (platform === 'tiktok' || platform === 'instagram') {
+    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key — there is no OAuth to connect.`
+  }
+  return null
 }
 
 export function isPlatformOAuthAvailable(platform: StreamPlatform): boolean {
-  return platform !== 'custom' && !oauthUnavailableReason(platform)
+  return !oauthUnavailableReason(platform)
 }
 
 function isStreamPlatform(value: unknown): value is StreamPlatform {
   return typeof value === 'string' && (STREAM_PLATFORM_ORDER as readonly string[]).includes(value)
 }
 
-function makeStreamTarget(platform: StreamPlatform, now: string): StreamTargetSettings {
+function makeStreamTarget(
+  def: (typeof STREAM_TARGET_DEFS)[number],
+  now: string
+): StreamTargetSettings {
   return {
-    // One built-in target per platform in v1, so the platform name is a stable id.
-    id: platform,
-    platform,
-    label: STREAM_PLATFORM_LABELS[platform],
+    id: def.id,
+    platform: def.platform,
+    label: def.label,
     enabled: false,
-    serverUrl: rtmpDefaults[platform],
+    serverUrl: def.serverUrl,
     urlMode: 'server-and-key',
     streamKey: '',
     streamKeyPresent: false,
     authMode: 'manual-rtmp',
+    ...(def.outputOrientation ? { outputOrientation: def.outputOrientation } : {}),
     status: { state: 'not-configured' },
     createdAt: now,
     updatedAt: now
@@ -394,7 +498,7 @@ function makeStreamTarget(platform: StreamPlatform, now: string): StreamTargetSe
 }
 
 function defaultStreamTargets(now: string = new Date().toISOString()): StreamTargetSettings[] {
-  return STREAM_PLATFORM_ORDER.map((platform) => makeStreamTarget(platform, now))
+  return STREAM_TARGET_DEFS.map((def) => makeStreamTarget(def, now))
 }
 
 export function defaultStreamingSettings(): StreamingSettings {
@@ -563,6 +667,20 @@ export const streamPlatformOutputCapabilities: Record<
     maxBitrateKbps: 6000,
     true4k: false
   },
+  tiktok: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  instagram: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
   custom: {
     maxWidth: 1920,
     maxHeight: 1080,
@@ -618,6 +736,25 @@ export interface ProviderStreamOutputPlan {
 export interface ProviderStreamOutputPlanOptions {
   recordEnabled?: boolean
   separateEncodedOutputRoleAvailable?: boolean
+  /**
+   * Dual-orientation simulcast is armed (see `simulcastArmed`): vertical-bound
+   * destinations ride the vertical leg's own portrait encode, so they leave
+   * the horizontal plan — and the one auxiliary encoded role is theirs, so the
+   * horizontal plan can never claim a separate role. Mirrors the backend.
+   */
+  simulcastArmed?: boolean
+}
+
+/** The provider-plan options a full capture config implies. */
+export function providerStreamOutputPlanOptions(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'streaming' | 'layout'>,
+  separateEncodedOutputRoleAvailable = false
+): ProviderStreamOutputPlanOptions {
+  return {
+    recordEnabled: config.recordEnabled,
+    separateEncodedOutputRoleAvailable,
+    simulcastArmed: simulcastArmed(config)
+  }
 }
 
 export function streamOutputVideoSettings(
@@ -690,13 +827,17 @@ export function resolveProviderStreamOutputPlan(
   streaming: StreamingSettings | undefined,
   {
     recordEnabled = false,
-    separateEncodedOutputRoleAvailable = false
+    separateEncodedOutputRoleAvailable: separateRoleRequested = false,
+    simulcastArmed: simulcast = false
   }: ProviderStreamOutputPlanOptions = {}
 ): ProviderStreamOutputPlan {
+  const separateEncodedOutputRoleAvailable = separateRoleRequested && !simulcast
   const requestedTargets =
     streaming?.enabled === true
       ? streaming.targets
-          .filter((target) => target.enabled)
+          .filter(
+            (target) => target.enabled && !(simulcast && target.outputOrientation === 'vertical')
+          )
           .map((target) => ({
             target,
             video: streamOutputVideoForTarget(recording, streaming, target)
@@ -1527,6 +1668,12 @@ function normalizeStreamTarget(
         : undefined,
     outputPreset,
     outputBitrateKbps,
+    // Leg binding survives reloads; anything unexpected (and every legacy
+    // config) falls back to the platform default's orientation.
+    outputOrientation:
+      saved.outputOrientation === 'horizontal' || saved.outputOrientation === 'vertical'
+        ? saved.outputOrientation
+        : base.outputOrientation,
     createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : base.createdAt,
     updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : base.updatedAt
   }
@@ -1536,13 +1683,17 @@ export function normalizeStreamingSettings(value: unknown): StreamingSettings {
   const candidate = (value && typeof value === 'object' ? value : {}) as Partial<StreamingSettings>
   const now = new Date().toISOString()
   const persisted = Array.isArray(candidate.targets) ? candidate.targets : []
-  const targets = STREAM_PLATFORM_ORDER.map((platform) => {
-    const base = makeStreamTarget(platform, now)
+  const targets = STREAM_TARGET_DEFS.map((def) => {
+    const base = makeStreamTarget(def, now)
     const saved = persisted.find(
       (target) =>
         target &&
         typeof target === 'object' &&
-        (target.id === platform || target.platform === platform)
+        (target.id === def.id ||
+          // Legacy configs stored one target per platform with id == platform;
+          // only the original horizontal cards may match by platform so a saved
+          // "youtube" can never hydrate the vertical card's credentials.
+          (def.id === def.platform && target.id == null && target.platform === def.platform))
     )
     return saved ? normalizeStreamTarget(base, saved) : base
   })
@@ -1654,10 +1805,14 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
     : undefined
 
   if (primary) {
+    const legacyPreset: RtmpPreset =
+      primary.platform === 'tiktok' || primary.platform === 'instagram'
+        ? 'custom'
+        : primary.platform
     return {
       ...config,
       streamEnabled: true,
-      rtmpPreset: primary.platform,
+      rtmpPreset: legacyPreset,
       rtmpServerUrl: primary.serverUrl,
       streamKey: primary.streamKey
     }

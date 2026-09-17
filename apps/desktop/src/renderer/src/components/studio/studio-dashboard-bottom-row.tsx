@@ -2,6 +2,7 @@ import type { ReactElement } from 'react'
 
 import { AudioMixer } from '@/components/studio/audio-mixer'
 import { ScenesGallery } from '@/components/studio/scenes-gallery'
+import { VerticalLegMonitor } from '@/components/studio/vertical-leg-monitor'
 
 /**
  * Below-the-fold Studio controls. Keeping this row in one deferred chunk lets
@@ -12,6 +13,7 @@ export function StudioDashboardBottomRow(): ReactElement {
   return (
     <div className="grid gap-5 lg:grid-cols-2">
       <ScenesGallery />
+      <VerticalLegMonitor />
       <AudioMixer />
     </div>
   )

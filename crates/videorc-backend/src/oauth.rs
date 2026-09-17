@@ -42,7 +42,11 @@ pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'
         StreamPlatform::Youtube if !youtube_oauth_enabled() => {
             Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE)
         }
-        StreamPlatform::Twitch | StreamPlatform::X | StreamPlatform::Custom => None,
+        StreamPlatform::Twitch
+        | StreamPlatform::X
+        | StreamPlatform::Tiktok
+        | StreamPlatform::Instagram
+        | StreamPlatform::Custom => None,
         StreamPlatform::Youtube => None,
     }
 }
@@ -540,7 +544,9 @@ impl OAuthSessions {
             StreamPlatform::Youtube => &self.youtube_finalization,
             StreamPlatform::Twitch => &self.twitch_finalization,
             StreamPlatform::X => &self.x_finalization,
-            StreamPlatform::Custom => &self.custom_finalization,
+            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {
+                &self.custom_finalization
+            }
         };
         lock.clone().lock_owned().await
     }
@@ -2473,6 +2479,10 @@ fn parse_provider_profile(
         StreamPlatform::Twitch => parse_twitch_profile(value),
         StreamPlatform::X => parse_x_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
+        StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
+            "{} livestreams use a manual stream key — there is no OAuth to connect.",
+            crate::streaming::stream_platform_label(platform)
+        ),
     }
 }
 
@@ -2754,6 +2764,10 @@ impl OAuthTokenResponse {
 
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
+        StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
+            "{} livestreams use a manual stream key — there is no OAuth to connect.",
+            crate::streaming::stream_platform_label(platform)
+        ),
         StreamPlatform::Youtube => {
             if let Some(message) = provider_oauth_unavailable_message(platform) {
                 anyhow::bail!("{message}");

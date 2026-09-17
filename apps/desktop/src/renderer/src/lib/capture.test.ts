@@ -1110,12 +1110,12 @@ describe('videoProfileCompatibility', () => {
       defaultBitrateKbps: 30000,
       targets: config.streaming.targets.map((target) => ({
         ...target,
-        enabled: target.platform === 'youtube' || target.platform === 'twitch'
+        enabled: target.id === 'youtube' || target.platform === 'twitch'
       }))
     }
 
     const outputs = streamOutputVideosForTargets(config.video, config.streaming)
-    const youtube = outputs.find((output) => output.target?.platform === 'youtube')
+    const youtube = outputs.find((output) => output.target?.id === 'youtube')
     const twitch = outputs.find((output) => output.target?.platform === 'twitch')
 
     expect(youtube?.video).toEqual(videoPresets['stream-safe-1080p30'])
@@ -1132,7 +1132,7 @@ describe('videoProfileCompatibility', () => {
         defaultBitrateKbps: 1234,
         targets: config.streaming.targets.map((target) => ({
           ...target,
-          enabled: target.platform === 'youtube'
+          enabled: target.id === 'youtube'
         }))
       }
 
@@ -1179,7 +1179,7 @@ describe('videoProfileCompatibility', () => {
       defaultBitrateKbps: 10000,
       targets: config.streaming.targets.map((target) => ({
         ...target,
-        enabled: target.platform === 'youtube' || target.platform === 'twitch'
+        enabled: target.id === 'youtube' || target.platform === 'twitch'
       }))
     }
 
@@ -1195,7 +1195,7 @@ describe('videoProfileCompatibility', () => {
       separateEncodedOutputRoleAvailable: true
     })
     expect(split.separateEncodedOutputRole).toBe(true)
-    expect(split.targets.find(({ target }) => target?.platform === 'youtube')?.video).toEqual(
+    expect(split.targets.find(({ target }) => target?.id === 'youtube')?.video).toEqual(
       videoPresets['stream-youtube-1080p30']
     )
     expect(split.targets.find(({ target }) => target?.platform === 'twitch')?.video).toEqual(
@@ -1256,7 +1256,7 @@ describe('videoProfileCompatibility', () => {
               outputPreset: 'stream-safe-1080p30',
               outputBitrateKbps: 6000
             }
-          : { ...target, enabled: target.platform === 'youtube' }
+          : { ...target, enabled: target.id === 'youtube' }
       )
     }
 
@@ -1278,7 +1278,7 @@ describe('videoProfileCompatibility', () => {
       defaultBitrateKbps: 30000,
       targets: config.streaming.targets.map((target) => ({
         ...target,
-        enabled: target.platform === 'youtube'
+        enabled: target.id === 'youtube'
       }))
     }
 
@@ -1353,7 +1353,7 @@ describe('prepared YouTube completion targets', () => {
   ) => ({
     ...defaultCaptureConfig.streaming,
     targets: defaultCaptureConfig.streaming.targets.map((target) =>
-      target.platform === 'youtube'
+      target.id === 'youtube'
         ? {
             ...target,
             enabled,

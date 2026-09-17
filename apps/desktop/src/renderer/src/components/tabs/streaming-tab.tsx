@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   GaugeIcon,
   HeartbeatIcon,
+  InstagramIcon,
   LinkIcon,
   LivestreamIcon,
   ResetIcon,
@@ -13,6 +14,7 @@ import {
   SuccessIcon,
   SyncIcon,
   TextIcon,
+  TiktokIcon,
   TwitchIcon,
   WarningIcon,
   XPlatformIcon,
@@ -73,6 +75,7 @@ import type {
 import {
   isStreamTargetReady,
   oauthUnavailableReason,
+  providerStreamOutputPlanOptions,
   resolveProviderStreamOutputPlan,
   STREAM_OUTPUT_GOP_SECONDS,
   streamVideoProfileValidationReason,
@@ -95,6 +98,8 @@ const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,
   twitch: TwitchIcon,
   x: XPlatformIcon,
+  tiktok: TiktokIcon,
+  instagram: InstagramIcon,
   custom: LivestreamIcon
 }
 
@@ -151,10 +156,7 @@ export function StreamingTab(): ReactElement {
   const providerPlan = resolveProviderStreamOutputPlan(
     video,
     captureConfig.streamEnabled ? streaming : undefined,
-    {
-      recordEnabled: captureConfig.recordEnabled,
-      separateEncodedOutputRoleAvailable
-    }
+    providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
   )
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
@@ -531,7 +533,12 @@ function DestinationCard({
         icon={<PlatformGlyph platform={target.platform} />}
         title={target.label}
         context={account?.accountLabel ?? (oauthMode ? undefined : 'Manual RTMP')}
-        meta={<Badge variant={badge.tone}>{badge.label}</Badge>}
+        meta={
+          <span className="flex items-center gap-1.5">
+            {target.outputOrientation === 'vertical' ? <Badge variant="outline">9:16</Badge> : null}
+            <Badge variant={badge.tone}>{badge.label}</Badge>
+          </span>
+        }
         role="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
@@ -554,6 +561,19 @@ function DestinationCard({
       </ListRow>
       {statusMessage ? (
         <span className="-mt-2 text-xs text-muted-foreground">{statusMessage}</span>
+      ) : null}
+      {expanded && manualKeyGuidance(target.platform) ? (
+        <div className="-mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="min-w-0">{manualKeyGuidance(target.platform)?.copy}</span>
+          <Button
+            className="h-auto px-0 text-xs"
+            size="xs"
+            variant="link"
+            onClick={() => openExternalUrl(manualKeyGuidance(target.platform)?.url ?? '')}
+          >
+            {manualKeyGuidance(target.platform)?.linkLabel}
+          </Button>
+        </div>
       ) : null}
       {enableLockGate ? (
         // Neutral limit strip: a pipeline cap, not a plan boundary, so no
@@ -844,7 +864,33 @@ const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
   youtube: 'bg-[#ff0033]/15 text-[#ff0033]',
   twitch: 'bg-[#9146ff]/15 text-[#a970ff]',
   x: 'bg-foreground/10 text-foreground',
+  tiktok: 'bg-foreground/10 text-foreground',
+  instagram: 'bg-[#e1306c]/15 text-[#e1306c]',
   custom: 'bg-foreground/10 text-muted-foreground'
+}
+
+// Manual-key platforms rotate their key per broadcast and gate LIVE access on
+// their side — link the user to the source of truth instead of promising
+// automation Videorc cannot deliver (no public ingest APIs).
+function manualKeyGuidance(
+  platform: StreamPlatform
+): { copy: string; url: string; linkLabel: string } | null {
+  switch (platform) {
+    case 'tiktok':
+      return {
+        copy: 'TikTok keys change every broadcast and need LIVE access on your account — paste a fresh server URL and key each time from',
+        url: 'https://livecenter.tiktok.com',
+        linkLabel: 'TikTok LIVE Center'
+      }
+    case 'instagram':
+      return {
+        copy: 'Instagram keys come from Live Producer (professional accounts): start the stream here, then press "Go live" in',
+        url: 'https://www.instagram.com/live/producer/',
+        linkLabel: 'Live Producer'
+      }
+    default:
+      return null
+  }
 }
 
 function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement {

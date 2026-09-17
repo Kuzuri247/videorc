@@ -65,11 +65,13 @@ import {
   preparedXCompletionTargets,
   preparedYouTubeActivationTargets,
   preparedYouTubeCompletionTargets,
+  providerStreamOutputPlanOptions,
   readyStreamTargetLabels,
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
   rtmpDefaults,
+  simulcastArmed,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
@@ -512,7 +514,7 @@ function streamingWithTargetPatch(
 }
 
 export function resolvedStreamingProfileEntitlementGate(
-  captureConfig: Pick<CaptureConfig, 'video' | 'streaming'>,
+  captureConfig: Pick<CaptureConfig, 'video' | 'streaming' | 'streamEnabled' | 'layout'>,
   entitlements: EntitlementsSnapshot | null
 ): ReturnType<typeof videoProfileEntitlementGate> {
   const providerPlan = resolveProviderStreamOutputPlan(
@@ -522,7 +524,8 @@ export function resolvedStreamingProfileEntitlementGate(
       // Recording has its own entitlement gate. Resolve the profile actually
       // destined for providers here so a retained YouTube default cannot
       // accidentally gate a provider-safe Twitch/X output.
-      recordEnabled: false
+      recordEnabled: false,
+      simulcastArmed: simulcastArmed(captureConfig)
     }
   )
   return videoProfileEntitlementGate({
@@ -553,10 +556,7 @@ export function buildStreamOutputTopologyProbeParams(
   // the authority that proves or rejects the separate encoded role. Building
   // this request from the unproved shared plan would make a high-rate YouTube
   // record+stream session preflight one topology and start another.
-  const providerPlanOptions = {
-    recordEnabled: captureConfig.recordEnabled,
-    separateEncodedOutputRoleAvailable: true
-  }
+  const providerPlanOptions = providerStreamOutputPlanOptions({ ...captureConfig, streaming }, true)
   const providerPlan = resolveProviderStreamOutputPlan(
     recordingProfile,
     streaming,
@@ -2673,7 +2673,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionOutputReadiness = useMemo(() => {
     const streamVideos = streamOutputVideosForTargets(
       captureConfig.video,
-      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+      captureConfig.streamEnabled ? captureConfig.streaming : undefined,
+      providerStreamOutputPlanOptions(captureConfig)
     ).map(({ video }) => video)
     return captionSessionOutputReadiness({
       burnTarget: captureConfig.captions.burnTarget,
@@ -10929,7 +10930,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             'streamTargets.youtube.prepare',
             {
               accountId: target.accountId,
-              video: captureConfig.video
+              // The vertical-bound broadcast advertises the PORTRAIT profile —
+              // the same transposition the simulcast leg composes at.
+              video:
+                target.outputOrientation === 'vertical'
+                  ? coerceVideoToOrientation(captureConfig.video, 'vertical')
+                  : captureConfig.video
             }
           )
           const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])

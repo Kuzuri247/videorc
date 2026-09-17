@@ -144,6 +144,7 @@ pub struct StreamingEntitlementLimits {
     pub max_height: u32,
     pub max_fps: u32,
     pub max_bitrate_kbps: u32,
+    /// TOTAL enabled destinations across both orientation legs (one shared cap).
     pub max_destinations: u32,
 }
 
@@ -891,10 +892,28 @@ pub struct StartSessionParams {
     pub streaming: Option<StreamingSettings>,
     #[serde(default)]
     pub captions: Option<CaptionsSessionParams>,
+    /// Dual-orientation simulcast: a SECOND composed leg with its own scene
+    /// geometry (the saved vertical scene) from the same captured sources.
+    /// Present only when a vertical-bound destination is armed; vertical
+    /// targets consume this leg, horizontal targets the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulcast: Option<SimulcastParams>,
     /// Renderer click timestamp (epoch ms) for latency attribution. Telemetry
     /// only: never load-bearing for the start itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at_ms: Option<u64>,
+}
+
+/// The vertical leg of a dual-orientation session. The layout must be a
+/// vertical preset on a portrait canvas — validated per leg at session start,
+/// mirroring the primary's orientation rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulcastParams {
+    pub layout: LayoutSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<Scene>,
+    pub video: VideoSettings,
 }
 
 /// Optional `session.stop` params. Older renderers send none.

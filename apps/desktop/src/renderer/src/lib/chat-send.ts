@@ -21,6 +21,9 @@ export const CHAT_SEND_PLATFORM_MAX_CHARS: Record<StreamPlatform, number> = {
   youtube: CHAT_SEND_MAX_CHARS,
   twitch: CHAT_SEND_MAX_CHARS,
   x: CHAT_SEND_MAX_CHARS,
+  // No public chat API — never reached by a send, kept for the strict Record.
+  tiktok: CHAT_SEND_MAX_CHARS,
+  instagram: CHAT_SEND_MAX_CHARS,
   custom: CHAT_SEND_MAX_CHARS
 }
 

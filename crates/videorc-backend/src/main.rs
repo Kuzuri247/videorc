@@ -2849,7 +2849,7 @@ async fn prepare_session_live_chat(
                     params.platforms.push(StreamPlatform::X);
                 }
             }
-            StreamPlatform::Custom => {}
+            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
         }
     }
     (!params.destinations.is_empty()).then_some(params)
