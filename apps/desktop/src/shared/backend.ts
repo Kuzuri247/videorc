@@ -3267,11 +3267,33 @@ export interface CommentHighlightState {
   reason?: string
 }
 
+/** Corner of the stream canvas the highlighted message is composited into.
+ * Mirrors Rust `CommentHighlightAnchor` (kebab-case). */
+export const COMMENT_HIGHLIGHT_ANCHORS = [
+  'top-left',
+  'top-right',
+  'bottom-left',
+  'bottom-right'
+] as const
+
+export type CommentHighlightAnchor = (typeof COMMENT_HIGHLIGHT_ANCHORS)[number]
+
+// Owner call 2026-09-20: bottom left keeps the card off faces and off the
+// usual top-right camera bubble; captions on the same edge step above it.
+export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR: CommentHighlightAnchor = 'bottom-left'
+
+/** Unknown or missing values (old prefs file, forged IPC) land on the default. */
+export function normalizeCommentHighlightAnchor(value: unknown): CommentHighlightAnchor {
+  return (COMMENT_HIGHLIGHT_ANCHORS as readonly unknown[]).includes(value)
+    ? (value as CommentHighlightAnchor)
+    : DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
+}
+
 export interface SetCommentHighlightParams {
   sessionId: string
   messageId: string
   pngBase64: string
-  position: 'top' | 'bottom'
+  anchor: CommentHighlightAnchor
 }
 
 export interface CommentsCommandResolution<T> {
@@ -3372,6 +3394,10 @@ export interface CommentsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  /** Where highlighted messages land on the stream. Owned by main so a
+   * highlight fired with the window closed (shortcut, deck, co-host) still
+   * honours the streamer's pick. */
+  highlightAnchor: CommentHighlightAnchor
   protected: boolean
   captureProtectionMarkerInstalled?: boolean
   enabled: boolean
@@ -3546,6 +3572,7 @@ export interface VideorcApi {
   toggleCommentsWindow: () => Promise<CommentsWindowState>
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
+  setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
   pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
   pushCommentsDelta: (delta: CommentsSnapshotDelta) => Promise<void>
@@ -3911,7 +3938,8 @@ export interface CohostQuestion {
   askers: string[]
   platforms: StreamPlatform[]
   priority: CohostPriority
-  /** Draft reply in the chat's language (≤ 200 chars); editable before send. */
+  /** Draft reply (≤ 200 chars); editable before send. The server pins it to
+   * English until a language setting exists — never to locale or geography. */
   suggestedReply: string
   fromNotes: boolean
   firstSeenAt: string
