@@ -4,7 +4,7 @@ import { cohostErrorDetail, cohostErrorDetailText, cohostReasonLabel } from './c
 // Co-host presence (W2). One pure derivation of `cohost.state` that every
 // surface renders: the Comments window header, the pane's segment header and
 // the Studio session panel. Presence is UNCONDITIONAL — a null or off-shaped
-// state is a state ("Co-host off"), never an absence.
+// state is a state ("Orcle off"), never an absence.
 //
 // Color discipline (videorc-design): the live accent is earned ONLY by an
 // engine that is actually listening; destructive red ONLY by a real error.
@@ -100,23 +100,23 @@ function presenceLabel(
 ): string {
   switch (kind) {
     case 'off':
-      return 'Co-host off'
+      return 'Orcle off'
     case 'starting':
-      return 'Co-host starting'
+      return 'Orcle starting'
     case 'reading': {
       const pending = nonNegative(state?.pendingMessages)
-      return `Co-host · reading ${pending} new…`
+      return `Orcle · reading ${pending} new…`
     }
     case 'thinking':
-      return 'Co-host · thinking…'
+      return 'Orcle · thinking…'
     case 'listening':
-      return openCount > 0 ? `Co-host · ${openCount} q` : 'Co-host listening'
+      return openCount > 0 ? `Orcle · ${openCount} q` : 'Orcle listening'
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
-      return reason ? `Co-host paused · ${reason}` : 'Co-host paused'
+      return reason ? `Orcle paused · ${reason}` : 'Orcle paused'
     }
     case 'error':
-      return 'Co-host error'
+      return 'Orcle error'
   }
 }
 
@@ -128,10 +128,10 @@ function presenceTooltip(
 ): string[] {
   const lines: string[] = []
   if (kind === 'off') {
-    lines.push('Co-host is off. It reads live chat, groups questions and drafts replies.')
+    lines.push('Orcle is off. It reads live chat, groups questions and drafts replies.')
   }
   if (kind === 'starting') {
-    lines.push('Co-host is starting. Waiting for the first pass.')
+    lines.push('Orcle is starting. Waiting for the first pass.')
   }
 
   const lastPass = cohostAgoLabel(state?.lastTickAt ?? null, nowMs)
@@ -201,7 +201,7 @@ export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostStat
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
   if (view.kind === 'listening') return 'Listening. Questions from chat will appear here.'
   if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
-  return 'Questions from chat will appear here once co-host is listening again.'
+  return 'Questions from chat will appear here once Orcle is listening again.'
 }
 
 /**

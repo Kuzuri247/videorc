@@ -69,7 +69,7 @@ export function CohostSettingsSection(): ReactElement | null {
   const save = (patch: Parameters<typeof patchCohostSettings>[0]): void => {
     setNotesError(null)
     void patchCohostSettings(patch).catch((error: unknown) =>
-      setNotesError(error instanceof Error ? error.message : 'Could not save co-host settings.')
+      setNotesError(error instanceof Error ? error.message : 'Could not save Orcle settings.')
     )
   }
 
@@ -86,12 +86,12 @@ export function CohostSettingsSection(): ReactElement | null {
     <PanelSection
       description="Alpha: expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
       icon={CohostIcon}
-      title="Co-host (alpha)"
+      title="Orcle (alpha)"
     >
       {locked ? (
         <Alert variant="warning">
           <AlertIcon weight="fill" />
-          <AlertTitle>Premium co-host</AlertTitle>
+          <AlertTitle>Orcle is Premium</AlertTitle>
           <AlertDescription>
             {cohostGate.allowed ? null : cohostGate.reason}
             {!cohostGate.allowed && cohostGate.upgradeUrl ? (
@@ -112,7 +112,7 @@ export function CohostSettingsSection(): ReactElement | null {
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="cohost-enabled">Enable co-host</FieldLabel>
+              <FieldLabel htmlFor="cohost-enabled">Enable Orcle</FieldLabel>
               <p className="text-xs text-muted-foreground">
                 Starts with your next livestream. Uses cloud AI, so it also needs the cloud-AI
                 consent you set in Publish.
@@ -150,9 +150,9 @@ export function CohostSettingsSection(): ReactElement | null {
         </Field>
 
         <Field>
-          <FieldLabel htmlFor="cohost-notes">Co-host notes</FieldLabel>
+          <FieldLabel htmlFor="cohost-notes">Orcle notes</FieldLabel>
           <FieldDescription>
-            Facts the co-host answers from, one per line. For example:
+            Facts Orcle answers from, one per line. For example:
             <br />
             <span className="text-subtle">Keyboard: Keychron Q1 with Boba U4T switches.</span>
             <br />
@@ -193,7 +193,7 @@ export function CohostSettingsSection(): ReactElement | null {
         <Field>
           <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
           <FieldDescription>
-            Plain-language rules the co-host flags for you, like “no spoilers” or “English only”.
+            Plain-language rules Orcle flags for you, like “no spoilers” or “English only”.
           </FieldDescription>
           {rules.length > 0 ? (
             <ul aria-label="Chat rules" className="flex flex-col gap-1.5">
@@ -269,7 +269,7 @@ export function CohostSettingsSection(): ReactElement | null {
         <Field>
           <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
           <FieldDescription>
-            How sure the co-host must be before a flag shows up. Relaxed shows only the clear cases,
+            How sure Orcle must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
           </FieldDescription>
           <ToggleGroup

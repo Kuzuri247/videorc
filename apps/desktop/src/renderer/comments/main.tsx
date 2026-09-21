@@ -254,7 +254,7 @@ function CommentsWindowApp(): ReactElement {
             {
               destinationId: 'cohost-command',
               platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Co-host action failed.'
+              reason: error instanceof Error ? error.message : 'Orcle action failed.'
             }
           ])
         )
@@ -270,8 +270,10 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toast.error(
-          error instanceof Error ? error.message : 'Could not change the co-host setting.',
-          { id: 'cohost-enable' }
+          error instanceof Error ? error.message : 'Could not change the Orcle setting.',
+          {
+            id: 'cohost-enable'
+          }
         )
       )
   }
@@ -291,7 +293,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Live Co-host requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Orcle requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 
