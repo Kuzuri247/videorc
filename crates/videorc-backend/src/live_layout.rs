@@ -399,6 +399,9 @@ pub async fn apply_layout_live(
     state: &AppState,
     request: SceneLayoutApplyParams,
 ) -> Result<LiveLayoutApplyStatus> {
+    if request.simulcast_leg {
+        return apply_simulcast_leg_request(state, request.config, request.intent_id).await;
+    }
     apply_scene_transaction(
         state,
         request.config,
@@ -461,15 +464,19 @@ async fn apply_scene_transaction(
     let target_sources = target_sources_override.unwrap_or(&params.sources);
     let scene = scene_from_capture_config(params.clone());
     let needs = required_scene_sources(&scene);
-    let intent_id = begin_layout_intent(state, requested_intent_id, needs).await?;
-    let session_active = state.recording.lock().await.is_some();
 
     // Orientation classes imply the canvas (vertical = portrait) and the
     // encoder canvas is fixed at session start — crossing classes mid-session
     // is refused honestly in BOTH directions (the renderer hides cross-mode
     // scenes too; this is defense in depth). Scene switches WITHIN a class
     // stay fully live: sources, backgrounds, and any same-orientation preset.
-    if session_active {
+    //
+    // Judged BEFORE the layout intent is registered: a vertical-scene
+    // transaction in a dual-orientation session lands on the SIMULCAST leg
+    // only. It must never become the latest layout intent — that would cancel
+    // an in-flight horizontal switch and overwrite which sources the
+    // horizontal program is recorded as needing.
+    if state.recording.lock().await.is_some() {
         let requested_vertical = params.layout.layout_preset.is_vertical();
         // An unknown running layout is treated as horizontal — the
         // conservative reading the pre-split blocker used.
@@ -482,49 +489,18 @@ async fn apply_scene_transaction(
                 .is_some_and(|layout| layout.layout_preset.is_vertical())
         };
         if running_vertical != requested_vertical {
-            // Dual-orientation session: a vertical-scene transaction lands on
-            // the SIMULCAST leg's snapshot without touching the primary; the
-            // bail fires only when no leg matches the requested orientation.
             if requested_vertical && crate::compositor::has_compositor_simulcast_scene(state).await
             {
-                let revision = {
-                    let compositor = state.compositor.lock().await;
-                    compositor.status.scene_revision
-                };
-                let revision = next_scene_revision(
-                    revision,
-                    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
-                );
-                crate::compositor::update_compositor_simulcast_scene(
-                    state,
-                    crate::protocol::CompositorSceneUpdateParams {
-                        revision,
-                        scene: Some(scene.clone()),
-                        layout: params.layout.clone(),
-                        active_screen: None,
-                        transition_ms: None,
-                    },
-                )
-                .await;
-                let compositor_status = {
-                    let compositor = state.compositor.lock().await;
-                    compositor.status.clone()
-                };
-                let status = SceneCommitStatus {
-                    applied: true,
-                    mode: "hot".to_string(),
-                    scene_revision: revision,
-                    scene: scene.clone(),
-                    compositor_status,
-                    message: None,
-                };
-                return Ok(layout_apply_status(intent_id, "hot", scene, status, None));
+                return apply_simulcast_leg_scene(state, &params, scene, requested_intent_id).await;
             }
             bail!(
                 "Switching between horizontal and vertical scenes changes the canvas orientation. Stop the session first."
             );
         }
     }
+
+    let intent_id = begin_layout_intent(state, requested_intent_id, needs).await?;
+    let session_active = state.recording.lock().await.is_some();
 
     // This explicit scene/config intent owns camera-recovery supersession from
     // this point, including a same-generation Hot layout commit that never
@@ -619,6 +595,88 @@ async fn run_explicit_camera_configuration_transaction<T>(
     explicit_camera_mutation.finish();
     reconcile_explicit_camera_configuration_change(state).await;
     result
+}
+
+/// An explicit vertical-leg request (the Vertical stream card, and the leg
+/// re-derived after each program commit). Refused, never redirected, when
+/// there is no running leg to receive it: the renderer can send one just as
+/// the owner presses Stop, and the idle program must never become the
+/// portrait leg scene.
+async fn apply_simulcast_leg_request(
+    state: &AppState,
+    params: SceneConfigParams,
+    requested_intent_id: Option<u64>,
+) -> Result<LiveLayoutApplyStatus> {
+    if let Some(blocker) = preset_selection_blocker(&params) {
+        bail!(blocker);
+    }
+    if !params.layout.layout_preset.is_vertical() {
+        bail!("The vertical stream only takes vertical scenes.");
+    }
+    if state.recording.lock().await.is_none()
+        || !crate::compositor::has_compositor_simulcast_scene(state).await
+    {
+        bail!("The vertical stream is not live, so there is nothing to change.");
+    }
+    let scene = scene_from_capture_config(params.clone());
+    apply_simulcast_leg_scene(state, &params, scene, requested_intent_id).await
+}
+
+/// Commit a vertical scene to the SIMULCAST leg of a running dual-orientation
+/// session. The horizontal program is untouched: no layout intent is
+/// registered, no source admission changes, and the primary scene revision
+/// and layout stay exactly as they were. The echoed intent id is the caller's
+/// (or the current latest) purely so the response shape is unchanged.
+async fn apply_simulcast_leg_scene(
+    state: &AppState,
+    params: &SceneConfigParams,
+    scene: Scene,
+    requested_intent_id: Option<u64>,
+) -> Result<LiveLayoutApplyStatus> {
+    let intent_id = match requested_intent_id {
+        Some(intent_id) => intent_id,
+        None => state.layout_intents.lock().await.latest_intent_id,
+    };
+    let revision = {
+        let compositor = state.compositor.lock().await;
+        compositor.status.scene_revision
+    };
+    let revision = next_scene_revision(
+        revision,
+        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+    );
+    crate::compositor::update_compositor_simulcast_scene(
+        state,
+        crate::protocol::CompositorSceneUpdateParams {
+            revision,
+            scene: Some(scene.clone()),
+            layout: params.layout.clone(),
+            active_screen: None,
+            transition_ms: None,
+        },
+    )
+    .await;
+    let compositor_status = {
+        let compositor = state.compositor.lock().await;
+        compositor.status.clone()
+    };
+    let status = SceneCommitStatus {
+        applied: true,
+        mode: "hot".to_string(),
+        scene_revision: revision,
+        scene: scene.clone(),
+        compositor_status,
+        message: None,
+    };
+    let framing = match params.layout.vertical_screen_framing {
+        crate::protocol::VerticalScreenFraming::Fill => "fill",
+        crate::protocol::VerticalScreenFraming::Fit => "fit",
+    };
+    tracing::info!(
+        "[simulcast-leg] vertical scene changed live: {:?}, screen framing {framing}",
+        params.layout.layout_preset
+    );
+    Ok(layout_apply_status(intent_id, "hot", scene, status, None))
 }
 
 async fn begin_layout_intent(
@@ -1731,6 +1789,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vertical_scene_lands_on_the_simulcast_leg_and_never_touches_the_horizontal_program() {
+        use crate::protocol::VerticalScreenFraming;
+        let state = test_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "dual-orientation",
+        ));
+        let portrait = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Custom,
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let mut armed = config(LayoutPreset::VerticalScreenOnly, true, true);
+        armed.video = Some(portrait.clone());
+        crate::compositor::update_compositor_simulcast_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene_from_capture_config(armed.clone())),
+                layout: armed.layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+
+        // A horizontal switch is in flight: it owns the latest layout intent
+        // and recorded that the horizontal program needs only the camera.
+        let horizontal = config(LayoutPreset::CameraOnly, true, false);
+        let horizontal_needs =
+            required_scene_sources(&scene_from_capture_config(horizontal.clone()));
+        let horizontal_intent = begin_layout_intent(&state, Some(40), horizontal_needs)
+            .await
+            .expect("horizontal intent registers");
+        let primary_before = {
+            let compositor = state.compositor.lock().await;
+            (
+                compositor.status.scene_layout.clone(),
+                compositor.status.scene_revision,
+            )
+        };
+
+        // The owner's fix mid-stream: whole screen on top, camera below.
+        let mut vertical = config(LayoutPreset::VerticalCameraBottom, true, true);
+        vertical.video = Some(portrait);
+        vertical.layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+        let status = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(41),
+                simulcast_leg: false,
+                config: vertical,
+            },
+        )
+        .await
+        .expect("vertical scene commits to the simulcast leg");
+        assert!(status.applied);
+        assert_eq!(status.mode, "hot");
+
+        // The leg composes the new scene...
+        let leg = crate::compositor::test_compositor_simulcast_layout(&state)
+            .await
+            .expect("simulcast leg stays armed");
+        assert_eq!(leg.layout_preset, LayoutPreset::VerticalCameraBottom);
+        assert_eq!(leg.vertical_screen_framing, VerticalScreenFraming::Fit);
+
+        // ...and the horizontal program never noticed: its in-flight intent is
+        // still current, its source needs were not overwritten, and its
+        // committed layout + revision are untouched.
+        ensure_layout_intent_current(&state, horizontal_intent)
+            .await
+            .expect("the vertical leg must not supersede a horizontal intent");
+        {
+            let intents = state.layout_intents.lock().await;
+            assert_eq!(intents.latest_intent_id, 40);
+            assert_eq!(intents.latest_needs_camera, horizontal_needs.camera);
+            assert_eq!(intents.latest_needs_screen, horizontal_needs.screen);
+        }
+        let compositor = state.compositor.lock().await;
+        assert_eq!(compositor.status.scene_layout, primary_before.0);
+        assert_eq!(compositor.status.scene_revision, primary_before.1);
+    }
+
+    #[tokio::test]
+    async fn explicit_leg_request_lands_on_the_leg_and_never_on_the_program() {
+        use crate::protocol::VerticalScreenFraming;
+        let state = test_state();
+        let mut vertical = config(LayoutPreset::VerticalCameraBottom, true, true);
+        vertical.layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+        let leg_request = |config: SceneConfigParams| SceneLayoutApplyParams {
+            intent_id: Some(12),
+            simulcast_leg: true,
+            config,
+        };
+        let program_before = {
+            let compositor = state.compositor.lock().await;
+            (
+                compositor.status.scene_layout.clone(),
+                compositor.status.scene_revision,
+            )
+        };
+
+        // 1. After Stop (no session): refused, and nothing is committed —
+        //    the idle program must never become the portrait leg scene.
+        let error = apply_layout_live(&state, leg_request(vertical.clone()))
+            .await
+            .expect_err("no session, no leg");
+        assert!(error.to_string().contains("not live"), "{error}");
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(compositor.status.scene_layout, program_before.0);
+            assert_eq!(compositor.status.scene_revision, program_before.1);
+        }
+        assert_eq!(state.layout_intents.lock().await.latest_intent_id, 0);
+
+        // 2. A session without a vertical leg: refused the same way.
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "horizontal-only",
+        ));
+        apply_layout_live(&state, leg_request(vertical.clone()))
+            .await
+            .expect_err("no leg is armed");
+        assert!(
+            crate::compositor::test_compositor_simulcast_layout(&state)
+                .await
+                .is_none()
+        );
+
+        // 3. A horizontal scene is never a leg scene.
+        crate::compositor::update_compositor_simulcast_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene_from_capture_config(vertical.clone())),
+                layout: vertical.layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        let error = apply_layout_live(
+            &state,
+            leg_request(config(LayoutPreset::ScreenCamera, true, true)),
+        )
+        .await
+        .expect_err("horizontal scene on the vertical leg");
+        assert!(
+            error.to_string().contains("only takes vertical scenes"),
+            "{error}"
+        );
+
+        // 4. With a running leg: lands on the leg, registers no intent.
+        let mut screen_only = config(LayoutPreset::VerticalScreenOnly, true, true);
+        screen_only.layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+        let status = apply_layout_live(&state, leg_request(screen_only))
+            .await
+            .expect("leg commit");
+        assert_eq!(status.mode, "hot");
+        let leg = crate::compositor::test_compositor_simulcast_layout(&state)
+            .await
+            .expect("leg armed");
+        assert_eq!(leg.layout_preset, LayoutPreset::VerticalScreenOnly);
+        assert_eq!(leg.vertical_screen_framing, VerticalScreenFraming::Fit);
+        assert_eq!(state.layout_intents.lock().await.latest_intent_id, 0);
+        let compositor = state.compositor.lock().await;
+        assert_eq!(compositor.status.scene_layout, program_before.0);
+        assert_eq!(compositor.status.scene_revision, program_before.1);
+    }
+
+    #[tokio::test]
+    async fn vertical_scene_without_a_simulcast_leg_is_still_refused_mid_session() {
+        let state = test_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "horizontal-only",
+        ));
+        let error = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(7),
+                simulcast_leg: false,
+                config: config(LayoutPreset::VerticalCameraBottom, true, true),
+            },
+        )
+        .await
+        .expect_err("no leg matches the requested orientation");
+        assert!(
+            error.to_string().contains("stop the session first"),
+            "{error}"
+        );
+        // A refused transaction registers nothing either.
+        assert_eq!(state.layout_intents.lock().await.latest_intent_id, 0);
+    }
+
+    #[tokio::test]
     async fn geometry_resync_is_inert_while_a_session_is_recording() {
         // The 0.9.53–0.9.57 regression: a hot preset switch mid-recording
         // (inset -> full canvas changes the capture box) force-restarted the
@@ -2043,6 +2296,7 @@ mod tests {
             camera_offset_y: 0,
             side_by_side_split: SideBySideSplit::SeventyThirty,
             side_by_side_camera_side: SideBySideCameraSide::Right,
+            vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

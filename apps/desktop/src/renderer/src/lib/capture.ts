@@ -9,6 +9,7 @@ import type {
   LayoutPreset,
   LayoutSettings,
   RtmpPreset,
+  SceneConfigParams,
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
@@ -17,6 +18,7 @@ import type {
   StreamPlatform,
   StoreManualStreamKeyResult,
   StreamTargetSettings,
+  VerticalScreenFraming,
   VideoPreset,
   VideoSettings
 } from '../../../shared/backend'
@@ -99,6 +101,21 @@ export type CaptureConfig = {
    */
   lastHorizontalPreset: LayoutPreset
   lastVerticalPreset: LayoutPreset
+  /**
+   * Screen framing for the vertical SIMULCAST leg (dual-orientation live
+   * streaming). Separate from layout.verticalScreenFraming on purpose: the
+   * leg mirrors a live program where the shared screen is the content, so it
+   * defaults to 'fit' (whole screen), while vertical Studio mode records
+   * short-form video and keeps the 'fill' law (owner decision O1, 2026-09-21).
+   */
+  simulcastScreenFraming: VerticalScreenFraming
+  /**
+   * The vertical leg follows the horizontal program's scene KIND: a
+   * camera-only program streams the vertical camera scene, a screen-only
+   * program the vertical screen scene, anything else the remembered vertical
+   * scene. Keeps the leg from asking for a source the program is not showing.
+   */
+  simulcastFollowsProgram: boolean
   recordEnabled: boolean
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
@@ -107,6 +124,11 @@ export type CaptureConfig = {
   streaming: StreamingSettings
   captions: CaptionsCaptureSettings
 }
+
+/** The vertical simulcast leg's user-facing settings. */
+export type SimulcastLegPatch = Partial<
+  Pick<CaptureConfig, 'lastVerticalPreset' | 'simulcastScreenFraming' | 'simulcastFollowsProgram'>
+>
 
 export type LegacyStreamKeyMigrationCandidate = {
   targetId: string
@@ -219,13 +241,68 @@ export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | u
     return undefined
   }
   return {
-    layout: {
-      ...config.layout,
-      layoutPreset: config.lastVerticalPreset,
-      cameraTransformMode: 'preset',
-      cameraTransform: null
-    },
+    layout: simulcastLegLayout(config),
     video: coerceVideoToOrientation(config.video, 'vertical')
+  }
+}
+
+/**
+ * The live twin of buildSimulcastParams: the scene transaction that moves the
+ * vertical leg of a RUNNING dual-orientation session, or null when no leg is
+ * armed. Built exactly like the session-start leg (same sources, derived
+ * layout, portrait canvas, no background) so a live edit can never make the
+ * leg look different from how it went live. `simulcastLeg` makes the backend
+ * commit it to the leg only, and refuse it when no leg is running.
+ */
+export function simulcastLegLiveRequest(
+  config: CaptureConfig
+): (SceneConfigParams & { simulcastLeg: true }) | null {
+  const leg = buildSimulcastParams(config)
+  if (!leg) {
+    return null
+  }
+  return { simulcastLeg: true, sources: config.sources, layout: leg.layout, video: leg.video }
+}
+
+/**
+ * The vertical scene the simulcast leg streams for a horizontal program
+ * scene. With follow on, the leg mirrors the program's KIND (camera-only and
+ * screen-only have exact vertical twins); every other program scene, and
+ * follow off, streams the remembered vertical scene.
+ */
+export function simulcastLegPreset(
+  config: Pick<CaptureConfig, 'layout' | 'lastVerticalPreset' | 'simulcastFollowsProgram'>,
+  programPreset: LayoutPreset = config.layout.layoutPreset
+): LayoutPreset {
+  if (config.simulcastFollowsProgram) {
+    if (programPreset === 'camera-only') {
+      return 'vertical-camera-only'
+    }
+    if (programPreset === 'screen-only') {
+      return 'vertical-screen-only'
+    }
+  }
+  return config.lastVerticalPreset
+}
+
+/**
+ * The simulcast leg's layout — ONE builder for session start and for live
+ * edits of the leg, so what goes live and what a mid-stream change commits
+ * can never disagree. Camera transform memory stays preset-mode.
+ */
+export function simulcastLegLayout(
+  config: Pick<
+    CaptureConfig,
+    'layout' | 'lastVerticalPreset' | 'simulcastFollowsProgram' | 'simulcastScreenFraming'
+  >,
+  programPreset: LayoutPreset = config.layout.layoutPreset
+): LayoutSettings {
+  return {
+    ...config.layout,
+    layoutPreset: simulcastLegPreset(config, programPreset),
+    verticalScreenFraming: config.simulcastScreenFraming,
+    cameraTransformMode: 'preset',
+    cameraTransform: null
   }
 }
 
@@ -1097,6 +1174,8 @@ export const defaultCaptureConfig: CaptureConfig = {
   verticalRestoreVideo: null,
   lastHorizontalPreset: 'screen-camera',
   lastVerticalPreset: 'vertical-camera-top',
+  simulcastScreenFraming: 'fit',
+  simulcastFollowsProgram: true,
   layout: {
     layoutPreset: 'screen-camera',
     cameraTransformMode: 'preset',
@@ -1118,7 +1197,8 @@ export const defaultCaptureConfig: CaptureConfig = {
     cameraOffsetX: 0,
     cameraOffsetY: 0,
     sideBySideSplit: '70-30',
-    sideBySideCameraSide: 'right'
+    sideBySideCameraSide: 'right',
+    verticalScreenFraming: 'fill'
   },
   audio: {
     microphoneGainDb: 0,
@@ -1239,6 +1319,13 @@ export function loadCaptureConfig(): CaptureConfig {
         : null,
     lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
     lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
+    simulcastScreenFraming: isVerticalScreenFraming(loaded.simulcastScreenFraming)
+      ? loaded.simulcastScreenFraming
+      : defaultCaptureConfig.simulcastScreenFraming,
+    simulcastFollowsProgram:
+      typeof loaded.simulcastFollowsProgram === 'boolean'
+        ? loaded.simulcastFollowsProgram
+        : defaultCaptureConfig.simulcastFollowsProgram,
     recordEnabled:
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled
@@ -1485,6 +1572,10 @@ function normalizeRememberedPreset(value: unknown, orientation: LayoutOrientatio
 
 const SIDE_BY_SIDE_SPLITS: readonly SideBySideSplit[] = ['50-50', '60-40', '70-30']
 
+function isVerticalScreenFraming(value: unknown): value is VerticalScreenFraming {
+  return value === 'fill' || value === 'fit'
+}
+
 function isSideBySideSplit(value: unknown): value is SideBySideSplit {
   return typeof value === 'string' && (SIDE_BY_SIDE_SPLITS as readonly string[]).includes(value)
 }
@@ -1608,7 +1699,10 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     sideBySideCameraSide:
       candidate.sideBySideCameraSide === 'left' || candidate.sideBySideCameraSide === 'right'
         ? candidate.sideBySideCameraSide
-        : defaultCaptureConfig.layout.sideBySideCameraSide
+        : defaultCaptureConfig.layout.sideBySideCameraSide,
+    verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
+      ? candidate.verticalScreenFraming
+      : defaultCaptureConfig.layout.verticalScreenFraming
   }
 }
 
