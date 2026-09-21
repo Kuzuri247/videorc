@@ -12,6 +12,7 @@ import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { SceneStage } from '@/components/scene/scene-stage'
+import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -106,6 +107,33 @@ export function LayoutTab(): ReactElement {
     layout.layoutPreset === 'vertical-split'
   const showOverlayControls =
     layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
+  const isFreeform = layout.arrangementMode === 'freeform'
+  // Corner/size/margin place the camera inside a preset scene; in freeform the
+  // stage and the numeric fields own position and size instead.
+  const showCameraCornerControls = showOverlayControls && !isFreeform
+  // The mask (shape/radius/aspect) and the precise fields apply wherever the
+  // camera is a user-owned bubble: the inset scenes and freeform.
+  const showCameraBubbleControls = showOverlayControls || isFreeform
+
+  // Entering freeform seeds the overrides from the committed scene so nothing
+  // visibly moves; the arrangement just becomes user-owned.
+  const enterFreeform = (): void => {
+    if (!scene) {
+      return
+    }
+    const sourceTransformOverrides = Object.fromEntries(
+      scene.sources.map((source) => [
+        source.id,
+        {
+          x: source.transform.x,
+          y: source.transform.y,
+          width: source.transform.width,
+          height: source.transform.height
+        }
+      ])
+    )
+    applyCameraPreset({ arrangementMode: 'freeform', sourceTransformOverrides })
+  }
   const layoutTabPresets =
     layoutPresetOrientation(layout.layoutPreset) === 'vertical'
       ? VERTICAL_LAYOUT_TAB_PRESETS
@@ -131,7 +159,7 @@ export function LayoutTab(): ReactElement {
                   !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen)
                 return (
                   <button
-                    aria-pressed={layout.layoutPreset === preset.id}
+                    aria-pressed={layout.layoutPreset === preset.id && !isFreeform}
                     className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={disabled}
                     key={preset.id}
@@ -148,6 +176,18 @@ export function LayoutTab(): ReactElement {
                   </button>
                 )
               })}
+              {/* Freeform is a mode, not a preset: composition becomes the
+                  user's per-source overrides (plan phase 4). */}
+              <button
+                aria-pressed={isFreeform}
+                className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                data-videorc-layout-preset="freeform"
+                disabled={!scene}
+                type="button"
+                onClick={enterFreeform}
+              >
+                <div>{layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}</div>
+              </button>
             </div>
             {isSessionActive ? (
               <p className="text-xs text-muted-foreground">
@@ -170,27 +210,40 @@ export function LayoutTab(): ReactElement {
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
           <SceneStage
+            // The camera's box aspect is owned by the mask law (circle boxes
+            // are square by construction; square/portrait force the crop), so
+            // resize gestures must not free it.
+            cameraAspectLocked={layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'}
             cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
             // WYSIWYG: only the inset scenes mask the camera bubble (backend
             // camera_mask policy) — side-by-side and the vertical bands render
             // a plain rectangle, so the schematic must too.
             cameraShape={effectiveCameraMaskShape(layout)}
-            dragEnabled={showOverlayControls && !isSessionActive}
-            hasBackground={Boolean(scene?.background)}
+            background={scene?.background ?? null}
+            dragEnabled={(showOverlayControls || isFreeform) && !isSessionActive}
+            freeform={isFreeform}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
+            // Free resize: the backend honors custom camera width/height
+            // (aspect law permitting) since plan phase 3.
+            resizeEnabled={(showOverlayControls || isFreeform) && !isSessionActive}
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
-            onCommitPosition={(sourceId, position) =>
-              void setSceneSourceTransform(sourceId, position)
+            onCommitTransform={(sourceId, transform) =>
+              void setSceneSourceTransform(sourceId, transform)
             }
+            onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
             onSelectSource={(sourceId) => {
               setSelectedSceneSourceId(sourceId)
               if (!sceneEditMode) {
                 setSceneEditMode(true)
               }
             }}
-            onSnapCorner={(cameraCorner) => applyCameraPreset({ cameraCorner })}
+            // Corner release re-enters a preset corner; in freeform a corner
+            // drop is just a position.
+            onSnapCorner={
+              isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
+            }
             onTogglePreview={() => void togglePreviewWindow()}
           />
 
@@ -210,7 +263,13 @@ export function LayoutTab(): ReactElement {
           ) : selectedSource.kind === 'camera' ? (
             <>
               <span className="text-[12.5px] leading-none font-medium text-subtle">Placement</span>
-              {isSideBySide ? (
+              {isFreeform ? (
+                <p className="text-sm text-muted-foreground">
+                  Freeform scene: drag and resize the camera on the stage, or set exact numbers
+                  below.
+                </p>
+              ) : null}
+              {isSideBySide && !isFreeform ? (
                 <>
                   <Field>
                     <FieldLabel>Split</FieldLabel>
@@ -247,71 +306,75 @@ export function LayoutTab(): ReactElement {
                 </>
               ) : null}
 
-              {isCameraOnly ? (
+              {isCameraOnly && !isFreeform ? (
                 <p className="text-sm text-muted-foreground">
                   Camera only fills the frame as a rectangle. Corner, size, and shape do not apply.
                   Use fit, mirror, zoom, and pan.
                 </p>
               ) : null}
 
-              {isVerticalCameraOnly ? (
+              {isVerticalCameraOnly && !isFreeform ? (
                 <p className="text-sm text-muted-foreground">
                   The camera fills the whole 9:16 canvas and crops to fit. Corner, size, and shape
                   do not apply. Use mirror, zoom, and pan to frame yourself.
                 </p>
               ) : null}
 
-              {isVerticalStack ? (
+              {isVerticalStack && !isFreeform ? (
                 <p className="text-sm text-muted-foreground">
                   The stacked vertical scenes give the camera and the screen fixed bands of the 9:16
                   canvas. Corner, size, and shape do not apply. Use mirror, zoom, and pan.
                 </p>
               ) : null}
 
-              {showOverlayControls ? (
-                <>
-                  <Field>
-                    <FieldLabel>Corner</FieldLabel>
-                    <ToggleGroup
-                      className="w-full"
-                      type="single"
-                      value={layout.cameraTransformMode === 'custom' ? '' : layout.cameraCorner}
-                      variant="outline"
-                      onValueChange={(value) =>
-                        value && applyCameraPreset({ cameraCorner: value as CameraCorner })
-                      }
-                    >
-                      <ToggleGroupItem value="top-left">Top L</ToggleGroupItem>
-                      <ToggleGroupItem value="top-right">Top R</ToggleGroupItem>
-                      <ToggleGroupItem value="bottom-left">Bot L</ToggleGroupItem>
-                      <ToggleGroupItem value="bottom-right">Bot R</ToggleGroupItem>
-                    </ToggleGroup>
-                  </Field>
+              {showCameraCornerControls ? (
+                <Field>
+                  <FieldLabel>Corner</FieldLabel>
+                  <ToggleGroup
+                    className="w-full"
+                    type="single"
+                    value={layout.cameraTransformMode === 'custom' ? '' : layout.cameraCorner}
+                    variant="outline"
+                    onValueChange={(value) =>
+                      value && applyCameraPreset({ cameraCorner: value as CameraCorner })
+                    }
+                  >
+                    <ToggleGroupItem value="top-left">Top L</ToggleGroupItem>
+                    <ToggleGroupItem value="top-right">Top R</ToggleGroupItem>
+                    <ToggleGroupItem value="bottom-left">Bot L</ToggleGroupItem>
+                    <ToggleGroupItem value="bottom-right">Bot R</ToggleGroupItem>
+                  </ToggleGroup>
+                </Field>
+              ) : null}
 
+              {showCameraBubbleControls ? (
+                <>
                   <div className="grid min-w-0 grid-cols-2 gap-4">
-                    <Field className="min-w-0">
-                      <FieldLabel>Size</FieldLabel>
-                      <ToggleGroup
-                        className="w-full"
-                        spacing={0}
-                        type="single"
-                        value={layout.cameraSize}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value && applyCameraPreset({ cameraSize: value as CameraSize })
-                        }
-                      >
-                        <ToggleGroupItem className="flex-1" value="small">
-                          S
-                        </ToggleGroupItem>
-                        <ToggleGroupItem className="flex-1" value="medium">
-                          M
-                        </ToggleGroupItem>
-                        <ToggleGroupItem className="flex-1" value="large">
-                          L
-                        </ToggleGroupItem>
-                      </ToggleGroup>
-                    </Field>
+                    {!isFreeform ? (
+                      <Field className="min-w-0">
+                        <FieldLabel>Size</FieldLabel>
+                        <ToggleGroup
+                          className="w-full"
+                          spacing={0}
+                          type="single"
+                          value={layout.cameraSize}
+                          variant="outline"
+                          onValueChange={(value) =>
+                            value && applyCameraPreset({ cameraSize: value as CameraSize })
+                          }
+                        >
+                          <ToggleGroupItem className="flex-1" value="small">
+                            S
+                          </ToggleGroupItem>
+                          <ToggleGroupItem className="flex-1" value="medium">
+                            M
+                          </ToggleGroupItem>
+                          <ToggleGroupItem className="flex-1" value="large">
+                            L
+                          </ToggleGroupItem>
+                        </ToggleGroup>
+                      </Field>
+                    ) : null}
                     <Field className="min-w-0">
                       <FieldLabel>Shape</FieldLabel>
                       <ToggleGroup
@@ -415,15 +478,32 @@ export function LayoutTab(): ReactElement {
                     </Field>
                   ) : null}
 
-                  <PowerSlider
-                    label="Margin"
-                    max={96}
-                    min={0}
-                    numericInput
-                    suffix="px"
-                    value={layout.cameraMargin}
-                    onChange={(cameraMargin) => patchLayout({ cameraMargin })}
-                    onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
+                  {!isFreeform ? (
+                    <PowerSlider
+                      label="Margin"
+                      max={96}
+                      min={0}
+                      numericInput
+                      suffix="px"
+                      value={layout.cameraMargin}
+                      onChange={(cameraMargin) => patchLayout({ cameraMargin })}
+                      onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
+                    />
+                  ) : null}
+
+                  {/* The precise twin of the stage drag: numeric percent
+                      fields that commit through the same backend scene
+                      commit, so both paths always agree. */}
+                  <SourceTransformFields
+                    aspectForced={
+                      layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'
+                    }
+                    disabled={isSessionActive}
+                    disabledReason="Scene layout is locked while a session is live."
+                    outputHeight={captureConfig.video.height}
+                    outputWidth={captureConfig.video.width}
+                    source={selectedSource}
+                    onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
                   />
                 </>
               ) : null}
@@ -640,7 +720,7 @@ export function LayoutTab(): ReactElement {
                 onVisibilityChange={setSceneSourceVisible}
               />
             </>
-          ) : sourceIsFullCanvas(selectedSource) ? (
+          ) : sourceIsFullCanvas(selectedSource) && !isFreeform ? (
             // Compact inspector for full-canvas sources: no dead controls — a
             // source that fills the frame has no position to nudge and nothing
             // to reset, so the arrow grid never renders (post-0.9.4 fix F3;
@@ -661,12 +741,7 @@ export function LayoutTab(): ReactElement {
           ) : (
             <div className="grid gap-3">
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold">{selectedSource.name}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {transformLabel(selectedSource)}
-                  </div>
-                </div>
+                <div className="min-w-0 truncate text-sm font-semibold">{selectedSource.name}</div>
                 <Button
                   disabled={isSessionActive}
                   size="sm"
@@ -676,6 +751,16 @@ export function LayoutTab(): ReactElement {
                   Reset
                 </Button>
               </div>
+              {/* Precise numeric twin of the stage gestures; commits ride the
+                  same backend scene commit and echo the sanitized result. */}
+              <SourceTransformFields
+                disabled={isSessionActive}
+                disabledReason="Scene layout is locked while a session is live."
+                outputHeight={captureConfig.video.height}
+                outputWidth={captureConfig.video.width}
+                source={selectedSource}
+                onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
+              />
               {/* w-fit + auto columns keep the arrows a tight d-pad cluster —
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). */}
@@ -771,14 +856,4 @@ function SourceVisibilityField({
 
 function sourceIsFullCanvas(source: SceneSource): boolean {
   return source.transform.width >= 1 && source.transform.height >= 1
-}
-
-function transformLabel(source: SceneSource): string {
-  const transform = source.transform
-  return [
-    `x ${Math.round(transform.x * 100)}%`,
-    `y ${Math.round(transform.y * 100)}%`,
-    `w ${Math.round(transform.width * 100)}%`,
-    `h ${Math.round(transform.height * 100)}%`
-  ].join(' · ')
 }
