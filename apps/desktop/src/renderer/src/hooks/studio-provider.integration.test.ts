@@ -2046,6 +2046,95 @@ describe('real StudioProvider lifecycle', () => {
     expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
   })
 
+  it('releases a takeover-owned mute at launch even when another bootstrap request fails', async () => {
+    // The previous run quit with a takeover on air: the mute and its ownership
+    // record are still in storage, but a fresh backend has no active takeover.
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    backend.activeScreen = null
+    const respond = backend.response.bind(backend)
+    vi.spyOn(backend, 'response').mockImplementation((command) => {
+      if (command.method === 'sessions.storage') {
+        throw new Error('storage totals unavailable')
+      }
+      return respond(command)
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY,
+      JSON.stringify({ priorMicrophoneMuted: false })
+    )
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        audio: { ...defaultCaptureConfig.audio, microphoneMuted: true }
+      })
+    )
+    // Releasing stores the restored config before it drops the ownership
+    // record, so the stored mute is never left without the record that
+    // releases it.
+    const releaseWrites: string[] = []
+    const setItem = localStorage.setItem.bind(localStorage)
+    const removeItem = localStorage.removeItem.bind(localStorage)
+    vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
+      if (
+        key === STORAGE_KEYS.captureConfig &&
+        JSON.parse(value).audio?.microphoneMuted === false
+      ) {
+        releaseWrites.push('unmuted config')
+      }
+      setItem(key, value)
+    })
+    vi.spyOn(localStorage, 'removeItem').mockImplementation((key: string) => {
+      if (key === SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) {
+        releaseWrites.push('ownership removed')
+      }
+      removeItem(key)
+    })
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.activeScreen === null &&
+        latest()?.core.captureConfig.audio.microphoneMuted === false
+    )
+    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
+    expect(
+      JSON.parse(localStorage.getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio.microphoneMuted
+    ).toBe(false)
+    expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
+  })
+
   it('shows one persistent recovery error when an active recording fails', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
@@ -2538,7 +2627,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — recording continues with silence',
+      'Microphone stopped: recording continues with silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2773,7 +2862,7 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — recording continues with silence',
+      'Microphone stopped: recording continues with silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2814,7 +2903,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(toastSpies.warning).toHaveBeenCalledTimes(2)
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped — saved recording contains silence',
+      'Microphone stopped: saved recording contains silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2874,7 +2963,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — live session continues with silence',
+      'Microphone stopped: live session continues with silence',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -3026,7 +3115,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.captureConfig.sources).toEqual(sources)
     expect(toastSpies.error).not.toHaveBeenCalled()
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Switch committed — output catching up.',
+      'Switch committed. Output catching up.',
       expect.objectContaining({ id: 'live-source-switch-output-catching-up' })
     )
   }, 10_000)

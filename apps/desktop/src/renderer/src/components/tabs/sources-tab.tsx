@@ -63,7 +63,7 @@ function sourceRuntimeChip({
         return {
           label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
           tone: 'warn',
-          hint: 'No fresh frames — re-select the source to restart it.'
+          hint: 'No fresh frames. Re-select the source to restart it.'
         }
       }
       return { label: 'Live', tone: 'good' }
@@ -150,6 +150,7 @@ export function SourcesTab(): ReactElement {
     useState<AudioSyncRecommendationReport | null>(null)
   const [syncCalibrationMessage, setSyncCalibrationMessage] = useState<string | null>(null)
   const [showSyncStimulusInstructions, setShowSyncStimulusInstructions] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const syncMeasurementInputRef = useRef<HTMLInputElement | null>(null)
   const syncCalibration = audioSyncCalibrationState(syncRecommendation, captureConfig.audio)
 
@@ -223,9 +224,22 @@ export function SourcesTab(): ReactElement {
     <ConfigGrid>
       <PanelSection
         action={
-          <Button size="sm" variant="outline" onClick={() => void refreshBackend()}>
-            <SyncIcon data-icon="inline-start" />
-            Refresh
+          <Button
+            disabled={refreshing}
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setRefreshing(true)
+              // fresh: a camera plugged in a moment ago must not get an answer
+              // from a refresh that started before the click.
+              void refreshBackend({ fresh: true }).finally(() => setRefreshing(false))
+            }}
+          >
+            <SyncIcon
+              className={refreshing ? 'animate-spin' : undefined}
+              data-icon="inline-start"
+            />
+            {refreshing ? 'Refreshing…' : 'Refresh'}
           </Button>
         }
         className="lg:col-span-2"

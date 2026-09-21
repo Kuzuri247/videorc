@@ -260,12 +260,51 @@ fn main() -> Result<()> {
         .worker_threads(backend_runtime_worker_threads())
         .enable_all()
         .build()?;
-    let result = runtime.block_on(run_backend());
+    let result = block_on_backend(&runtime);
     // `spawn_blocking` tasks cannot be aborted. Bound runtime destruction so
     // an already-safe backend can still exit if a device driver or render
     // owner ignores its cooperative shutdown signal.
     runtime.shutdown_timeout(PROCESS_RUNTIME_BLOCKING_TASK_SHUTDOWN_GRACE);
     result
+}
+
+/// The backend runs on its own thread so the process main thread can service
+/// the main run loop. AVFoundation learns about cameras that connect or
+/// disconnect through main-run-loop sources; with tokio parked on the main
+/// thread the process kept its launch-time camera list forever, so Refresh
+/// never found a camera plugged in after launch.
+#[cfg(target_os = "macos")]
+fn block_on_backend(runtime: &tokio::runtime::Runtime) -> Result<()> {
+    use objc2_core_foundation::{CFRunLoop, CFRunLoopRunResult, kCFRunLoopDefaultMode};
+
+    // The backend future was sized for the main thread's stack.
+    const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+    const RUN_LOOP_SLICE_SECONDS: f64 = 0.1;
+
+    std::thread::scope(|scope| {
+        let backend = std::thread::Builder::new()
+            .name("videorc-backend-main".to_string())
+            .stack_size(BACKEND_THREAD_STACK_BYTES)
+            .spawn_scoped(scope, || runtime.block_on(run_backend()))
+            .context("could not start the backend thread")?;
+        while !backend.is_finished() {
+            let mode = unsafe { kCFRunLoopDefaultMode };
+            let outcome = CFRunLoop::run_in_mode(mode, RUN_LOOP_SLICE_SECONDS, false);
+            // A run loop with no sources yet returns at once; do not spin.
+            if outcome == CFRunLoopRunResult::Finished {
+                std::thread::sleep(Duration::from_secs_f64(RUN_LOOP_SLICE_SECONDS));
+            }
+        }
+        match backend.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn block_on_backend(runtime: &tokio::runtime::Runtime) -> Result<()> {
+    runtime.block_on(run_backend())
 }
 
 fn backend_process_ownership_marker(token: &str) -> Result<String> {
@@ -340,6 +379,13 @@ async fn run_backend() -> Result<()> {
         ),
         Ok(_) => {}
         Err(error) => tracing::warn!("Could not reconcile recording finalizations: {error:#}"),
+    }
+    match database.retire_active_stream_screen_at_launch() {
+        Ok(Some(screen_id)) => {
+            tracing::info!("Retired takeover {screen_id} left active by the previous run")
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("Could not retire the previous run's takeover: {error:#}"),
     }
     match database.reconcile_session_deletions() {
         Ok(summary) if summary.completed > 0 || summary.pending > 0 => tracing::warn!(
@@ -3533,7 +3579,7 @@ fn spawn_x_playback_watch(
                     session_id.as_deref(),
                     protocol::HealthLevel::Warn,
                     "x-playback-pending",
-                    "X is still provisioning playback — viewers may see a loading spinner. Keep streaming; this can take a few minutes.",
+                    "X is still provisioning playback. Viewers may see a loading spinner. Keep streaming; this can take a few minutes.",
                 );
                 emit_status("pending", Some(published_at.elapsed().as_millis() as u64));
             }
@@ -3560,7 +3606,7 @@ fn spawn_x_playback_watch(
             session_id.as_deref(),
             protocol::HealthLevel::Error,
             "x-playback-unavailable",
-            "X never produced playback for this broadcast — viewers saw a loading spinner. Your local recording is unaffected.",
+            "X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.",
         );
         emit_status(
             "unavailable",

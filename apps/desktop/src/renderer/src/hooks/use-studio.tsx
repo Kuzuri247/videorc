@@ -1116,7 +1116,8 @@ export type StudioContextValue = {
   lastError: string | null
   runtimeInfo: RuntimeInfo | null
   // actions
-  refreshBackend: () => Promise<void>
+  /** `fresh` is for an explicit user Refresh: it never joins older in-flight work. */
+  refreshBackend: (options?: { fresh?: boolean }) => Promise<void>
   loadMoreSessions: () => Promise<void>
   loadSessionDetails: (sessionId: string) => Promise<void>
   refreshEntitlements: () => Promise<void>
@@ -2183,7 +2184,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // toast — a missing client and a non-live status used to revert the switch
       // silently.
       if (!client) {
-        throw new Error('Backend is not connected — try again in a moment.')
+        throw new Error('Backend is not connected. Try again in a moment.')
       }
       setCaptionLines([])
       let status: CaptionsStatus
@@ -2975,22 +2976,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownership: takeoverMuteOwnershipRef.current
     })
     takeoverMuteOwnershipRef.current = transition.ownership
-    persistScreenTakeoverMuteOwnership(transition.ownership)
     setActiveScreen(screen)
-    if (captureConfigRef.current.audio.microphoneMuted === transition.microphoneMuted) {
-      return
-    }
-    captureConfigRef.current = {
-      ...captureConfigRef.current,
-      audio: {
-        ...captureConfigRef.current.audio,
-        microphoneMuted: transition.microphoneMuted
+    const muteChanges =
+      captureConfigRef.current.audio.microphoneMuted !== transition.microphoneMuted
+    if (muteChanges) {
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        audio: {
+          ...captureConfigRef.current.audio,
+          microphoneMuted: transition.microphoneMuted
+        }
       }
     }
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: { ...current.audio, microphoneMuted: transition.microphoneMuted }
-    }))
+    // Persist the mute in the same step as its ownership record; left to the
+    // captureConfig effect, a quit between the two writes strands a muted
+    // microphone with no takeover to release it. The record is what lets a
+    // later launch release the mute, so a stored takeover mute never goes
+    // without it: taking a mute writes the record first, releasing one writes
+    // the restored config first.
+    if (transition.ownership) {
+      persistScreenTakeoverMuteOwnership(transition.ownership)
+    }
+    if (muteChanges) {
+      try {
+        localStorage.setItem(
+          STORAGE_KEYS.captureConfig,
+          JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
+        )
+      } catch {
+        // Storage is best effort; the effect below writes the same value.
+      }
+    }
+    if (!transition.ownership) {
+      persistScreenTakeoverMuteOwnership(null)
+    }
+    if (muteChanges) {
+      setCaptureConfig((current) => ({
+        ...current,
+        audio: { ...current.audio, microphoneMuted: transition.microphoneMuted }
+      }))
+    }
   }, [])
   useEffect(
     () => () => {
@@ -4956,7 +4981,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     xProducerReminderShownRef.current = true
-    toast.info('X feed is connected — now start the Broadcast on X.', {
+    toast.info('X feed is connected. Now start the Broadcast on X.', {
       description:
         'X does not go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, ' +
         'create a broadcast from your source, and press Broadcast.',
@@ -5930,13 +5955,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? {
                   state: 'warning' as const,
                   message:
-                    'X is still provisioning playback — viewers may see a loading spinner. Keep streaming; this can take a few minutes.',
+                    'X is still provisioning playback. Viewers may see a loading spinner. Keep streaming; this can take a few minutes.',
                   redactedUrl: event.shareUrl
                 }
               : {
                   state: 'warning' as const,
                   message:
-                    'X never produced playback for this broadcast — viewers saw a loading spinner. Your local recording is unaffected.',
+                    'X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.',
                   redactedUrl: event.shareUrl
                 }
         setCaptureConfig((current) => {
@@ -5999,6 +6024,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const accountBootstrapToken = accountSnapshotCoordinator.beginRefresh()
         const commentHighlightRevisionAtBootstrapStart = commentHighlightRevision
         const captionsStatusRevisionAtBootstrapStart = captionsStatusRevisionRef.current
+        // The takeover commit also releases the microphone mute a takeover
+        // owns, so it must not wait on the rest of the batch: one unrelated
+        // failed request used to skip it and strand a muted microphone with
+        // no takeover selected. A failed read stays unknown and commits
+        // nothing; it still fails the batch below so the error surfaces.
+        const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
+        void activeScreenBootstrap.then(
+          (nextActiveScreen) => {
+            if (
+              generationIsCurrent() &&
+              bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')
+            ) {
+              commitActiveScreen(nextActiveScreen)
+            }
+          },
+          () => undefined
+        )
         const [
           nextHealth,
           nextEntitlements,
@@ -6016,7 +6058,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextPreviewScreen,
           nextScene,
           nextScreens,
-          nextActiveScreen,
+          ,
           nextStreamMetadataDraft,
           nextSessions,
           nextSessionStorage,
@@ -6038,7 +6080,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<PreviewScreenStatus>('preview.screen.status'),
           bootstrapRequest<Scene>('scene.get'),
           bootstrapRequest<StreamScreen[]>('screens.list'),
-          bootstrapRequest<StreamScreen | null>('screens.active'),
+          activeScreenBootstrap,
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
           bootstrapRequest<SessionListPage>('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
           bootstrapRequest<SessionStorageTotals>('sessions.storage'),
@@ -6150,9 +6192,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'screenList')) {
           setScreens(nextScreens)
-        }
-        if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')) {
-          commitActiveScreen(nextActiveScreen)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'streamMetadata')) {
           setStreamMetadataDraft(nextStreamMetadataDraft)
@@ -6471,106 +6510,109 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const refreshBackend = useCallback(
-    (): Promise<void> =>
-      focusRefreshCoordinatorRef.current.run(async (generationIsCurrent) => {
-        await refreshMediaAccess()
-        const activeClient = clientRef.current
-        // Multiple focus listeners intentionally share this one coordinator.
-        // During backend replacement, the connection generation invalidates
-        // this work before any response can commit into the new client state.
-        if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
-          return
-        }
+    (options?: { fresh?: boolean }): Promise<void> =>
+      focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
+        async (generationIsCurrent) => {
+          await refreshMediaAccess()
+          const activeClient = clientRef.current
+          // Multiple focus listeners intentionally share this one coordinator.
+          // During backend replacement, the connection generation invalidates
+          // this work before any response can commit into the new client state.
+          if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
+            return
+          }
 
-        const refreshIsCurrent = (): boolean =>
-          generationIsCurrent() && clientRef.current === activeClient
-        const sessionListRefreshRequests = sessionListRefreshRequestRef.current
-        const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
-        sessionListGenerationRef.current += 1
-        sessionListMoreSingleFlightRef.current.invalidate('next-page')
-        setSessionsLoadingMore(false)
-        try {
-          setLastError(null)
-          const [
-            nextHealth,
-            ,
-            nextDevices,
-            nextSessions,
-            nextSessionStorage,
-            nextDiagnostics,
-            nextScreens,
-            nextActiveScreen,
-            nextPlatformAccounts,
-            nextOauthProviderCredentials,
-            nextPlatformAccountValidations,
-            nextStreamMetadataDraft,
-            nextNoiseCleanupJobs
-          ] = await Promise.all([
-            activeClient.request<BackendHealth>('health.ping'),
-            refreshEntitlementsForClient(activeClient),
-            activeClient.request<DeviceList>('devices.list'),
-            activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
-            activeClient.request<SessionStorageTotals>('sessions.storage'),
-            activeClient.request<DiagnosticStats>('diagnostics.stats'),
-            activeClient.request<StreamScreen[]>('screens.list'),
-            activeClient.request<StreamScreen | null>('screens.active'),
-            activeClient.request<PlatformAccount[]>('platformAccounts.list'),
-            activeClient.request<OAuthProviderCredentialStatus[]>(
-              'platformAccounts.oauth.providerCredentials'
-            ),
-            activeClient.request<PlatformAccountValidation[]>('platformAccounts.validate'),
-            activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get'),
-            activeClient.requestTyped('noiseCleanup.list', undefined)
-          ])
-          if (!refreshIsCurrent()) {
-            return
-          }
-          // Fetch identity after the maintenance batch and through the same
-          // Main-owned refresh path as the provider-focus listener. An early
-          // account.get snapshot must not land after a newer provider refresh.
-          const accountCommit = await refreshAccountSnapshotForClient(activeClient)
-          if (accountCommit) {
-            await refreshAiReadinessForClient(activeClient, accountCommit.snapshot, () =>
-              Boolean(refreshIsCurrent() && accountCommit.isCurrent())
+          const refreshIsCurrent = (): boolean =>
+            generationIsCurrent() && clientRef.current === activeClient
+          const sessionListRefreshRequests = sessionListRefreshRequestRef.current
+          const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
+          sessionListGenerationRef.current += 1
+          sessionListMoreSingleFlightRef.current.invalidate('next-page')
+          setSessionsLoadingMore(false)
+          try {
+            setLastError(null)
+            const [
+              nextHealth,
+              ,
+              nextDevices,
+              nextSessions,
+              nextSessionStorage,
+              nextDiagnostics,
+              nextScreens,
+              nextActiveScreen,
+              nextPlatformAccounts,
+              nextOauthProviderCredentials,
+              nextPlatformAccountValidations,
+              nextStreamMetadataDraft,
+              nextNoiseCleanupJobs
+            ] = await Promise.all([
+              activeClient.request<BackendHealth>('health.ping'),
+              refreshEntitlementsForClient(activeClient),
+              activeClient.request<DeviceList>('devices.list'),
+              activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
+              activeClient.request<SessionStorageTotals>('sessions.storage'),
+              activeClient.request<DiagnosticStats>('diagnostics.stats'),
+              activeClient.request<StreamScreen[]>('screens.list'),
+              activeClient.request<StreamScreen | null>('screens.active'),
+              activeClient.request<PlatformAccount[]>('platformAccounts.list'),
+              activeClient.request<OAuthProviderCredentialStatus[]>(
+                'platformAccounts.oauth.providerCredentials'
+              ),
+              activeClient.request<PlatformAccountValidation[]>('platformAccounts.validate'),
+              activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get'),
+              activeClient.requestTyped('noiseCleanup.list', undefined)
+            ])
+            if (!refreshIsCurrent()) {
+              return
+            }
+            // Fetch identity after the maintenance batch and through the same
+            // Main-owned refresh path as the provider-focus listener. An early
+            // account.get snapshot must not land after a newer provider refresh.
+            const accountCommit = await refreshAccountSnapshotForClient(activeClient)
+            if (accountCommit) {
+              await refreshAiReadinessForClient(activeClient, accountCommit.snapshot, () =>
+                Boolean(refreshIsCurrent() && accountCommit.isCurrent())
+              )
+            }
+            if (!refreshIsCurrent()) {
+              return
+            }
+            const nextStreamMetadataValidation =
+              await activeClient.request<StreamMetadataValidation>(
+                'streamTargets.metadata.validate',
+                nextStreamMetadataDraft
+              )
+            if (!refreshIsCurrent()) {
+              return
+            }
+            setHealth(nextHealth)
+            setDeviceList(nextDevices)
+            if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
+              sessionListGenerationRef.current += 1
+              setSessions(nextSessions.items)
+              setSessionsNextCursor(nextSessions.nextCursor ?? null)
+              setSessionStorageTotals(nextSessionStorage)
+            }
+            setDiagnosticStats(nextDiagnostics)
+            setScreens(nextScreens)
+            commitActiveScreen(nextActiveScreen)
+            setPlatformAccounts(nextPlatformAccounts)
+            setOauthProviderCredentials(nextOauthProviderCredentials)
+            setPlatformAccountValidations(nextPlatformAccountValidations)
+            setStreamMetadataDraft(nextStreamMetadataDraft)
+            setStreamMetadataValidation(nextStreamMetadataValidation)
+            setNoiseCleanupJobs((current) =>
+              nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
             )
+          } catch (error) {
+            if (refreshIsCurrent()) {
+              reportError(error)
+            }
+          } finally {
+            sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
           }
-          if (!refreshIsCurrent()) {
-            return
-          }
-          const nextStreamMetadataValidation = await activeClient.request<StreamMetadataValidation>(
-            'streamTargets.metadata.validate',
-            nextStreamMetadataDraft
-          )
-          if (!refreshIsCurrent()) {
-            return
-          }
-          setHealth(nextHealth)
-          setDeviceList(nextDevices)
-          if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
-            sessionListGenerationRef.current += 1
-            setSessions(nextSessions.items)
-            setSessionsNextCursor(nextSessions.nextCursor ?? null)
-            setSessionStorageTotals(nextSessionStorage)
-          }
-          setDiagnosticStats(nextDiagnostics)
-          setScreens(nextScreens)
-          commitActiveScreen(nextActiveScreen)
-          setPlatformAccounts(nextPlatformAccounts)
-          setOauthProviderCredentials(nextOauthProviderCredentials)
-          setPlatformAccountValidations(nextPlatformAccountValidations)
-          setStreamMetadataDraft(nextStreamMetadataDraft)
-          setStreamMetadataValidation(nextStreamMetadataValidation)
-          setNoiseCleanupJobs((current) =>
-            nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
-          )
-        } catch (error) {
-          if (refreshIsCurrent()) {
-            reportError(error)
-          }
-        } finally {
-          sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
         }
-      }),
+      ),
     [
       commitActiveScreen,
       refreshAccountSnapshotForClient,
@@ -7051,7 +7093,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected — layout unchanged.')
+        toast.error('Backend socket is not connected. Layout unchanged.')
         return Promise.resolve(false)
       }
 
@@ -7359,7 +7401,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
 
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected — source unchanged.')
+        toast.error('Backend socket is not connected. Source unchanged.')
         return
       }
       if (sourceDeviceSwitchPending) {
@@ -7391,7 +7433,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           console.warn(
             `Source switch committed at revision ${status.sceneRevision}; output proof was not observed. ${detail}`
           )
-          toast.warning('Switch committed — output catching up.', {
+          toast.warning('Switch committed. Output catching up.', {
             id: 'live-source-switch-output-catching-up',
             description:
               'The source selection was applied. Videorc will reconcile the output status as it catches up.'
@@ -8389,7 +8431,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) {
       // F-011: this used to be a silent no-op — the button appeared dead.
       toast.error('Microphone check', {
-        description: 'Backend is not connected — try again in a moment.'
+        description: 'Backend is not connected. Try again in a moment.'
       })
       return false
     }
@@ -11757,7 +11799,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) {
         // F-023: this used to be a silent no-op — the button appeared dead.
         toast.error('AI workflow', {
-          description: 'Backend is not connected — try again in a moment.'
+          description: 'Backend is not connected. Try again in a moment.'
         })
         return
       }
@@ -11802,7 +11844,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           toast.success('Transcript ready from live captions.', {
             description:
-              'Enable cloud consent to generate the title, description, and the rest of the pack — the transcript uploads as text only.'
+              'Enable cloud consent to generate the title, description, and the rest of the pack. The transcript uploads as text only.'
           })
         } else {
           toast.success('Local audio extracted.', {
@@ -11861,7 +11903,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const suggestClips = useCallback(
     async (sessionId: string): Promise<ClipSuggestResult | null> => {
       if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
         return null
       }
       try {
@@ -11877,7 +11919,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const exportClip = useCallback(
     async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
       if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
         return
       }
       try {
@@ -12045,7 +12087,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           outputVerdict(chosen, next.result) === 'too-heavy'
         ) {
           toast.warning(`${outputLabel(chosen)} is too heavy for this computer`, {
-            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady — switch in Recording → Output.`
+            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady. Switch in Recording → Output.`
           })
         }
       })
@@ -12200,7 +12242,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } else {
           toast.success(
             result.previousStreamKeyPresent
-              ? `${label} stream key removed — the previous key is kept for restore.`
+              ? `${label} stream key removed. The previous key is kept for restore.`
               : `${label} stream key removed.`
           )
         }
