@@ -15,6 +15,12 @@ import {
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import {
+  commitSceneTransform,
+  transformLayoutIntent,
+  transformSourceIdentity,
+  type TransformCommitResult
+} from '@/lib/scene-transform-commit'
+import {
   createContext,
   useCallback,
   useContext,
@@ -1204,7 +1210,7 @@ export type StudioContextValue = {
   setSceneSourceTransform: (
     sourceId: string,
     patch: { x?: number; y?: number; width?: number; height?: number }
-  ) => Promise<void>
+  ) => Promise<TransformCommitResult>
   commitCameraTransform: (sourceId: string, x: number, y: number) => Promise<void>
   setSceneSourceVisible: (sourceId: string, visible: boolean) => Promise<void>
   moveSceneSource: (sourceId: string, direction: -1 | 1) => Promise<void>
@@ -2877,6 +2883,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [previewScreenStatus, setPreviewScreenStatus] =
     useState<PreviewScreenStatus>(idlePreviewScreenStatus)
   const [scene, setScene] = useState<Scene | null>(null)
+  const transformSceneRef = useRef<Scene | null>(null)
   const [sceneEditMode, setSceneEditMode] = useState(false)
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
   const [audioMeter, setAudioMeter] = useState<AudioMeterResult | null>(null)
@@ -4497,6 +4504,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const applyScene = useCallback((nextScene: Scene) => {
+    transformSceneRef.current = nextScene
     setScene(nextScene)
     setSelectedSceneSourceId((current) =>
       current && nextScene.sources.some((source) => source.id === current)
@@ -6989,26 +6997,47 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
-  // SC3: absolute transform write for stage drags (nudge is directional).
+  // Precision edits return the authoritative status so a stage draft can stay
+  // visible until React has applied this exact commit. BackendClient rejects
+  // disconnects/timeouts; failures must never masquerade as acknowledgement.
   const setSceneSourceTransform = useCallback(
     async (
       sourceId: string,
       patch: { x?: number; y?: number; width?: number; height?: number }
-    ) => {
-      if (!client) {
-        return
-      }
-
+    ): Promise<TransformCommitResult> => {
+      const requestedScene = transformSceneRef.current
+      const requestedLayoutIntentId = layoutIntentIdRef.current
+      const identity = transformSourceIdentity(requestedScene)
+      const layoutIntent = transformLayoutIntent({ ...captureConfigRef.current.layout })
+      const captureIdentity = JSON.stringify({
+        sources: captureConfigRef.current.sources,
+        video: captureConfigRef.current.video
+      })
       setSceneTransformPending(true)
       try {
-        const status = await client.request<SceneCommitStatus>('scene.source.transform.update', {
+        return await commitSceneTransform({
           sourceId,
-          transform: patch
+          patch,
+          request:
+            client && requestedScene?.sources.some((source) => source.id === sourceId)
+              ? (params) =>
+                  client.request<SceneCommitStatus>('scene.source.transform.update', params)
+              : null,
+          isCurrent: (status) =>
+            clientRef.current === client &&
+            layoutIntentIdRef.current === requestedLayoutIntentId &&
+            transformSourceIdentity(transformSceneRef.current) === identity &&
+            status.scene.id === requestedScene?.id &&
+            transformLayoutIntent({ ...captureConfigRef.current.layout }) === layoutIntent &&
+            JSON.stringify({
+              sources: captureConfigRef.current.sources,
+              video: captureConfigRef.current.video
+            }) === captureIdentity &&
+            (nativePreviewCommittedSceneRef.current?.sceneRevision ?? 0) <= status.sceneRevision,
+          apply: applyCommittedScene,
+          persist: syncSourceTransformsToLayout,
+          reportError
         })
-        applyCommittedScene(status)
-        syncSourceTransformsToLayout(status.scene, sourceId)
-      } catch (error) {
-        reportError(error)
       } finally {
         setSceneTransformPending(false)
       }
@@ -12997,7 +13026,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat || isEditableTargetSafe(event.target)) {
+      if (
+        event.repeat ||
+        event.defaultPrevented ||
+        isEditableTargetSafe(event.target) ||
+        document.querySelector(
+          '[data-videorc-stage-phase="dragging"], [data-videorc-stage-phase="pending"]'
+        )
+      ) {
         return
       }
 

@@ -48,6 +48,7 @@ import type {
   PreviewWindowState,
   RecordingStatus,
   Scene,
+  SceneCommitStatus,
   SessionLogEntry,
   SessionSummary,
   StreamOutputTopologyProbeResult,
@@ -1522,6 +1523,239 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  async function mountFreeformTransformProvider(connected = true): Promise<{
+    backend: StudioBackend
+    latest: () => StudioObservation
+  }> {
+    const backend = new StudioBackend()
+    backend.currentLayout = { ...defaultCaptureConfig.layout, arrangementMode: 'freeform' }
+    backend.currentScene = sceneForLayout(backend.currentLayout)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    if (!connected) api.getBackendConnection = async () => null
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({ ...defaultCaptureConfig, layout: backend.currentLayout })
+    )
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    if (connected) await waitForObservation(() => observation?.core.scene != null)
+    return { backend, latest: () => observation! }
+  }
+
+  function preciseTransformStatus(backend: StudioBackend): SceneCommitStatus {
+    const scene: Scene = {
+      ...backend.currentScene,
+      sources: backend.currentScene.sources.map((source, index) => ({
+        ...source,
+        transform: {
+          ...source.transform,
+          x: index === 0 ? 0.012 : 0.0149,
+          y: 0.301,
+          width: 0.4,
+          height: 0.4
+        }
+      }))
+    }
+    return {
+      applied: true,
+      mode: 'idle',
+      sceneRevision: backend.revision + 1,
+      scene,
+      compositorStatus: compositorFor(scene, backend.currentLayout, backend.revision + 1)
+    }
+  }
+
+  it.each(['screen-source', 'camera-source'])(
+    'freeform transform waits for acknowledgement and persists precise %s and peer geometry',
+    async (sourceId) => {
+      const { backend, latest } = await mountFreeformTransformProvider()
+      const before = latest().core.scene
+      const status = preciseTransformStatus(backend)
+      const release = backend.deferResponse('scene.source.transform.update', status)
+      const patch = {
+        x: sourceId === 'screen-source' ? 0.012 : 0.0149,
+        y: 0.301,
+        width: 0.4,
+        height: 0.4
+      }
+      let pending!: ReturnType<StudioCoreContextValue['setSceneSourceTransform']>
+      let settled = false
+      act(() => {
+        pending = latest().core.setSceneSourceTransform(sourceId, patch)
+        void pending.then(() => {
+          settled = true
+        })
+      })
+      await waitForObservation(() =>
+        backend.sentCommands.some((command) => command.method === 'scene.source.transform.update')
+      )
+      expect(settled).toBe(false)
+      expect(latest().core.scene).toEqual(before)
+      expect(
+        backend.sentCommands.filter((command) => command.method === 'scene.source.transform.update')
+      ).toEqual([expect.objectContaining({ params: { sourceId, transform: patch, snap: 'none' } })])
+      await act(async () => {
+        release()
+        expect(await pending).toEqual({ ok: true, status })
+      })
+      expect(latest().core.scene).toEqual(status.scene)
+      expect(latest().core.captureConfig.layout.sourceTransformOverrides).toEqual({
+        'screen-source': { x: 0.012, y: 0.301, width: 0.4, height: 0.4 },
+        'camera-source': { x: 0.0149, y: 0.301, width: 0.4, height: 0.4 }
+      })
+    }
+  )
+
+  it.each(['rejected', 'not-applied', 'disconnect'] as const)(
+    'freeform transform reports %s without applying or persisting draft geometry',
+    async (failure) => {
+      const { backend, latest } = await mountFreeformTransformProvider()
+      const before = latest().core.scene
+      const overrides = latest().core.captureConfig.layout.sourceTransformOverrides
+      const status = preciseTransformStatus(backend)
+      const release =
+        failure === 'rejected'
+          ? backend.deferFailure('scene.source.transform.update', new Error('Transform rejected.'))
+          : backend.deferResponse('scene.source.transform.update', {
+              ...status,
+              applied: failure !== 'not-applied',
+              message: 'Transform not applied.'
+            })
+      let pending!: ReturnType<StudioCoreContextValue['setSceneSourceTransform']>
+      act(() => {
+        pending = latest().core.setSceneSourceTransform('camera-source', { x: 0.0149 })
+      })
+      await act(async () => {
+        if (failure === 'disconnect') backend.sockets[0]?.close()
+        release()
+        expect(await pending).toEqual({ ok: false })
+      })
+      expect(latest().core.scene).toEqual(before)
+      expect(latest().core.captureConfig.layout.sourceTransformOverrides).toEqual(overrides)
+      expect(latest().core.lastError).toBeTruthy()
+    }
+  )
+
+  it('freeform transform rejects editing without a backend connection', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider(false)
+    await act(async () => {
+      expect(await latest().core.setSceneSourceTransform('camera-source', { x: 0.0149 })).toEqual({
+        ok: false
+      })
+    })
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'scene.source.transform.update')
+    ).toHaveLength(0)
+    expect(latest().core.lastError).toContain('Reconnect')
+  })
+
+  it.each(['layout', 'device'] as const)(
+    'freeform transform ignores acknowledgement after a newer %s intent',
+    async (change) => {
+      const { backend, latest } = await mountFreeformTransformProvider()
+      const status = preciseTransformStatus(backend)
+      const release = backend.deferResponse('scene.source.transform.update', status)
+      let pending!: ReturnType<StudioCoreContextValue['setSceneSourceTransform']>
+      act(() => {
+        pending = latest().core.setSceneSourceTransform('camera-source', { x: 0.0149 })
+      })
+      await act(async () => {
+        latest().core.setCaptureConfig((current) =>
+          change === 'layout'
+            ? { ...current, layout: { ...current.layout, arrangementMode: 'preset' } }
+            : { ...current, sources: { ...current.sources, cameraId: 'camera:replacement' } }
+        )
+      })
+      const afterChange = latest().core.scene
+      const overrides = latest().core.captureConfig.layout.sourceTransformOverrides
+      await act(async () => {
+        release()
+        expect(await pending).toEqual({ ok: false })
+      })
+      expect(latest().core.scene).toEqual(afterChange)
+      expect(latest().core.captureConfig.layout.sourceTransformOverrides).toEqual(overrides)
+    }
+  )
+
+  it('freeform transform cannot overwrite a newer saved-scene choice with identical sources and layout', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    await waitForObservation(() => latest().core.canSaveScene)
+    await act(async () => {
+      expect(latest().core.saveScene('Identical A')).toBe(true)
+    })
+    const first = latest().core.savedScenes[0]
+    await act(async () => {
+      expect(latest().core.saveScene('Identical B')).toBe(true)
+    })
+    const second = latest().core.savedScenes[1]
+    expect(first.id).not.toBe(second.id)
+    expect(sameSceneVisual(first.visual, second.visual)).toBe(true)
+    expect(latest().core.activeSavedSceneId).toBe(second.id)
+
+    const beforeScene = latest().core.scene
+    const beforeConfig = latest().core.captureConfig
+    const beforeCheckpoint = localStorage.getItem(WORKING_SCENE_KEY)
+    const status = preciseTransformStatus(backend)
+    const releaseTransform = backend.deferResponse('scene.source.transform.update', status)
+    let transform!: ReturnType<StudioCoreContextValue['setSceneSourceTransform']>
+    act(() => {
+      transform = latest().core.setSceneSourceTransform('camera-source', { x: 0.0149 })
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'scene.source.transform.update')
+    )
+
+    // Hold the newer choice at source preflight. Its source/layout identities
+    // and authoritative revision have not changed, so only intent ownership
+    // can reject the older transform acknowledgement at this point.
+    const releaseSelection = backend.deferResponse('devices.list', backend.deviceList)
+    let selection!: Promise<boolean>
+    act(() => {
+      selection = latest().core.applySavedScene(first.id)
+    })
+    await waitForObservation(() => latest().core.savedScenePendingId === first.id)
+    expect(latest().core.scene).toEqual(beforeScene)
+    expect(latest().core.captureConfig.layout).toEqual(beforeConfig.layout)
+    expect(latest().core.captureConfig.sources).toEqual(beforeConfig.sources)
+    expect(backend.revision).toBeLessThan(status.sceneRevision)
+
+    await act(async () => {
+      releaseTransform()
+      expect(await transform).toEqual({ ok: false })
+    })
+    expect(latest().core.scene).toEqual(beforeScene)
+    expect(latest().core.captureConfig.layout.sourceTransformOverrides).toEqual(
+      beforeConfig.layout.sourceTransformOverrides
+    )
+    expect(latest().core.savedScenePendingId).toBe(first.id)
+    expect(latest().core.activeSavedSceneId).toBe(second.id)
+    expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(beforeCheckpoint)
+
+    await act(async () => {
+      releaseSelection()
+      expect(await selection).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().core.activeSavedSceneId === first.id && latest().core.canSaveScene
+    )
+    expect(latest().core.captureConfig.layout.sourceTransformOverrides).toEqual(
+      first.visual.layout.sourceTransformOverrides
+    )
+    expect(latest().core.savedSceneModified).toBe(false)
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
   })
 
   it('rehydrates failed recovery, single-flights retry, and rejects its stale response', async () => {
