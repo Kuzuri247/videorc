@@ -518,12 +518,42 @@ function normalizeAdditionalSignedHeaders(headers) {
 //                    metadata still bind every object exactly.
 //   ifMatchEtagForm  Ceph RGW answers 412 to the quoted entity tag it returned
 //                    and honours the bare digest.
+const DEFAULT_ORIGIN_CAPABILITIES = Object.freeze({
+  checksumHeaders: true,
+  ifMatchEtagForm: 'quoted'
+})
+
+// First matching host rule wins; an endpoint no rule matches (R2, AWS) gets
+// the defaults. Amend a rule only with probe:release-storage-compat evidence.
+const ORIGIN_CAPABILITY_RULES = [
+  {
+    // Hetzner Object Storage (Ceph RGW), measured 2026-09.
+    capabilities: { checksumHeaders: false, ifMatchEtagForm: 'unquoted' },
+    matches: (hostname) => hostname.endsWith('.your-objectstorage.com')
+  },
+  {
+    // Neon Object Storage: conditional PUT with the quoted ETag and
+    // x-amz-checksum-sha256 round trips both work, measured 2026-09-22 by
+    // probe:release-storage-compat.
+    capabilities: DEFAULT_ORIGIN_CAPABILITIES,
+    matches: isNeonStorageHostname
+  }
+]
+
 export function releaseUploadOriginCapabilities(config) {
   const hostname = config?.endpointUrl ? new URL(config.endpointUrl).hostname.toLowerCase() : ''
-  if (hostname.endsWith('.your-objectstorage.com')) {
-    return { checksumHeaders: false, ifMatchEtagForm: 'unquoted' }
-  }
-  return { checksumHeaders: true, ifMatchEtagForm: 'quoted' }
+  const rule = hostname ? ORIGIN_CAPABILITY_RULES.find(({ matches }) => matches(hostname)) : null
+  return { ...(rule?.capabilities ?? DEFAULT_ORIGIN_CAPABILITIES) }
+}
+
+// Neon storage endpoints are per branch:
+// <branch-id>.storage.c-<N>.<region>.aws.neon.tech. Anchored on both ends so
+// a lookalike such as x.aws.neon.tech.evil.com never matches.
+const NEON_STORAGE_HOSTNAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.storage\.c-[0-9]{1,6}\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.aws\.neon\.tech$/
+
+export function isNeonStorageHostname(hostname) {
+  return typeof hostname === 'string' && NEON_STORAGE_HOSTNAME.test(hostname)
 }
 
 export function createReleaseUploadS3Transport({ config }) {
@@ -961,10 +991,40 @@ export function buildReleasePutCondition({
   }
 }
 
+// Installers are stored with an attachment disposition. Neon ignores
+// response-content-disposition on presigned GETs (storage-compat-2026-09.md,
+// check 5c), so the web download routes cannot rely on it there. Derived from
+// the object key alone, so every path that publishes through here (uploads and
+// release:sync:origins) sets it. Updater zips, blockmaps, feeds and manifests
+// never carry it.
+const ATTACHMENT_EXTENSIONS = ['.dmg', '.exe']
+
+export function releaseArtifactContentDisposition(objectKey) {
+  const name = String(objectKey ?? '')
+    .split('/')
+    .at(-1)
+  if (!ATTACHMENT_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension))) {
+    return null
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(name)) {
+    throw new ReleaseUploadConfigError(
+      'invalid-attachment-filename',
+      `Installer object ${objectKey} has a filename that cannot be stored as an attachment disposition.`
+    )
+  }
+  return `attachment; filename="${name}"`
+}
+
+export function releaseArtifactDispositionHeaders(objectKey) {
+  const disposition = releaseArtifactContentDisposition(objectKey)
+  return disposition ? { 'content-disposition': disposition } : {}
+}
+
 async function putReleaseUploadArtifact({ artifact, condition, config, transport }) {
   const signed = buildSignedS3Request({
     additionalHeaders: {
       ...condition,
+      ...releaseArtifactDispositionHeaders(artifact.objectKey),
       'x-amz-meta-videorc-sha256': artifact.sha256
     },
     config,
@@ -1464,6 +1524,10 @@ function releaseUploadTlsPolicy(endpointUrl, env) {
       // Let's Encrypt leaves rotate every 60-90 days, so only the issuer is
       // pinned. The chain and hostname checks still apply.
       allowedIssuerOrganizations = ["Let's Encrypt"]
+    } else if (isNeonStorageHostname(hostname)) {
+      // Neon serves its storage endpoints with an Amazon-issued certificate
+      // (Amazon RSA 2048 M0x), measured 2026-09-22.
+      allowedIssuerOrganizations = ['Amazon']
     } else if (endpointUrl === null) {
       allowedIssuerOrganizations = ['Amazon']
     } else {
